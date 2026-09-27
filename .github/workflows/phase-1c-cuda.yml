@@ -49,15 +49,21 @@ jobs:
 
           Write-Host "CUDA_PATH=$env:CUDA_PATH"
 
-      - name: Configure CUDA bridge
+      - name: Install Ninja
         shell: pwsh
         run: |
-          cmake `
-            -S native/bridge `
-            -B build/bridge `
-            -DLLAMA_CPP_DIR="${{ github.workspace }}/external/llama.cpp" `
-            -DGGML_CUDA=ON `
-            -DGGML_NATIVE=OFF `
+          choco install ninja -y
+          ninja --version
+
+      - name: Configure CUDA bridge
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+          cmake -S native/bridge -B build/bridge -G "Ninja Multi-Config" ^
+            -DLLAMA_CPP_DIR="${{ github.workspace }}/external/llama.cpp" ^
+            -DGGML_CUDA=ON ^
+            -DGGML_NATIVE=OFF ^
             -DCMAKE_CUDA_ARCHITECTURES=89
 
       - name: Build CUDA bridge
@@ -133,3 +139,4 @@ jobs:
           name: leanmoe-phase-1c-cuda-win64
           path: artifacts/runtime/
           if-no-files-found: error
+
