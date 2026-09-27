@@ -10,3 +10,6 @@ reports/*
 
 !logs/.gitkeep
 !reports/.gitkeep
+
+# Local upstream sources
+external/

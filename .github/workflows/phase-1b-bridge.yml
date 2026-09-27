@@ -1,0 +1,104 @@
+﻿name: Phase 1B - Windows Bridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - phase-1b-bridge
+    paths:
+      - "native/bridge/**"
+      - "tests/native/**"
+      - ".github/workflows/phase-1b-bridge.yml"
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout LeanMoE
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned llama.cpp
+        shell: pwsh
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git external/llama.cpp
+          git -C external/llama.cpp checkout --detach cea74625f
+
+          $actual = git -C external/llama.cpp rev-parse --short HEAD
+
+          if ($actual -ne "cea74625f") {
+              throw "Wrong llama.cpp revision: $actual"
+          }
+
+          Write-Host "Pinned llama.cpp revision: $actual"
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake `
+            -S native/bridge `
+            -B build/bridge `
+            -DLLAMA_CPP_DIR="${{ github.workspace }}/external/llama.cpp" `
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build/bridge --config Release --target leanmoe_bridge
+
+      - name: Collect runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/runtime | Out-Null
+
+          $bridge = Get-ChildItem build/bridge `
+              -Recurse `
+              -Filter leanmoe_bridge.dll |
+              Select-Object -First 1
+
+          if (-not $bridge) {
+              throw "leanmoe_bridge.dll not found"
+          }
+
+          Copy-Item $bridge.FullName artifacts/runtime/
+
+          $dependencyNames = @(
+              "llama.dll",
+              "ggml.dll",
+              "ggml-base.dll"
+          )
+
+          foreach ($name in $dependencyNames) {
+              $file = Get-ChildItem build/bridge `
+                  -Recurse `
+                  -Filter $name |
+                  Select-Object -First 1
+
+              if (-not $file) {
+                  throw "$name not found"
+              }
+
+              Copy-Item $file.FullName artifacts/runtime/
+          }
+
+          Get-ChildItem build/bridge `
+              -Recurse `
+              -Filter "ggml-cpu*.dll" |
+              ForEach-Object {
+                  Copy-Item $_.FullName artifacts/runtime/
+              }
+
+          Write-Host "Collected runtime:"
+          Get-ChildItem artifacts/runtime
+
+      - name: Python ABI smoke test
+        shell: pwsh
+        run: |
+          python tests/native/bridge_smoke.py artifacts/runtime
+
+      - name: Upload Windows runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: leanmoe-phase-1b-win64
+          path: artifacts/runtime/
+          if-no-files-found: error
