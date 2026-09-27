@@ -25,6 +25,10 @@ struct lm_model_wrapper {
     llama_model * model = nullptr;
 };
 
+struct lm_context_wrapper {
+    llama_context * context = nullptr;
+};
+
 } // namespace
 
 
@@ -229,7 +233,204 @@ void lm_model_free(lm_model_t model) {
     delete wrapper;
 }
 
+lm_result lm_context_create(
+    lm_model_t model,
+    const lm_context_config * config,
+    lm_context_t * out_context
+) {
+    clear_error();
 
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (model == nullptr) {
+        set_error("Model handle is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (config == nullptr) {
+        set_error("Context config is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (out_context == nullptr) {
+        set_error("Output context pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    *out_context = nullptr;
+
+    lm_model_wrapper * model_wrapper =
+        static_cast<lm_model_wrapper *>(model);
+
+    if (model_wrapper->model == nullptr) {
+        set_error("Internal llama model pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (config->n_ctx == 0 ||
+        config->n_batch == 0 ||
+        config->n_ubatch == 0) {
+        set_error("Context sizes must be greater than zero");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (config->n_ubatch > config->n_batch) {
+        set_error("n_ubatch must not exceed n_batch");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    try {
+        llama_context_params params =
+            llama_context_default_params();
+
+        params.n_ctx = config->n_ctx;
+        params.n_batch = config->n_batch;
+        params.n_ubatch = config->n_ubatch;
+
+        switch (config->type_k) {
+            case LM_KV_F16:
+                params.type_k = GGML_TYPE_F16;
+                break;
+
+            case LM_KV_Q8_0:
+                params.type_k = GGML_TYPE_Q8_0;
+                break;
+
+            default:
+                set_error("Unsupported K cache type");
+                return LM_ERROR_INVALID_ARGUMENT;
+        }
+
+        switch (config->type_v) {
+            case LM_KV_F16:
+                params.type_v = GGML_TYPE_F16;
+                break;
+
+            case LM_KV_Q8_0:
+                params.type_v = GGML_TYPE_Q8_0;
+                break;
+
+            default:
+                set_error("Unsupported V cache type");
+                return LM_ERROR_INVALID_ARGUMENT;
+        }
+
+        params.flash_attn =
+            config->flash_attn != 0;
+
+        params.offload_kqv =
+            config->offload_kqv != 0;
+
+        llama_context * context =
+            llama_init_from_model(
+                model_wrapper->model,
+                params
+            );
+
+        if (context == nullptr) {
+            set_error("llama_init_from_model() returned null");
+            return LM_ERROR_BACKEND;
+        }
+
+        lm_context_wrapper * wrapper = nullptr;
+
+        try {
+            wrapper = new lm_context_wrapper();
+        }
+        catch (const std::bad_alloc &) {
+            llama_free(context);
+            set_error("Failed to allocate LeanMoE context wrapper");
+            return LM_ERROR_OUT_OF_MEMORY;
+        }
+
+        wrapper->context = context;
+
+        *out_context =
+            static_cast<lm_context_t>(wrapper);
+
+        return LM_OK;
+    }
+    catch (const std::bad_alloc &) {
+        set_error("Out of memory while creating context");
+        return LM_ERROR_OUT_OF_MEMORY;
+    }
+    catch (const std::exception & exc) {
+        set_error(exc.what());
+        return LM_ERROR_BACKEND;
+    }
+    catch (...) {
+        set_error("Unknown exception while creating context");
+        return LM_ERROR_BACKEND;
+    }
+}
+
+
+void lm_context_free(lm_context_t context) {
+    if (context == nullptr) {
+        return;
+    }
+
+    lm_context_wrapper * wrapper =
+        static_cast<lm_context_wrapper *>(context);
+
+    if (wrapper->context != nullptr) {
+        llama_free(wrapper->context);
+        wrapper->context = nullptr;
+    }
+
+    delete wrapper;
+}
+
+
+uint32_t lm_context_n_ctx(lm_context_t context) {
+    if (context == nullptr) {
+        return 0;
+    }
+
+    const lm_context_wrapper * wrapper =
+        static_cast<const lm_context_wrapper *>(context);
+
+    if (wrapper->context == nullptr) {
+        return 0;
+    }
+
+    return llama_n_ctx(wrapper->context);
+}
+
+
+uint32_t lm_context_n_batch(lm_context_t context) {
+    if (context == nullptr) {
+        return 0;
+    }
+
+    const lm_context_wrapper * wrapper =
+        static_cast<const lm_context_wrapper *>(context);
+
+    if (wrapper->context == nullptr) {
+        return 0;
+    }
+
+    return llama_n_batch(wrapper->context);
+}
+
+
+uint32_t lm_context_n_ubatch(lm_context_t context) {
+    if (context == nullptr) {
+        return 0;
+    }
+
+    const lm_context_wrapper * wrapper =
+        static_cast<const lm_context_wrapper *>(context);
+
+    if (wrapper->context == nullptr) {
+        return 0;
+    }
+
+    return llama_n_ubatch(wrapper->context);
+}
 uint64_t lm_model_size(lm_model_t model) {
     if (model == nullptr) {
         return 0;

@@ -1,0 +1,146 @@
+name: Phase 2A - Windows Context Runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - phase-2a-context
+    paths:
+      - "native/bridge/**"
+      - "tests/native/**"
+      - ".github/workflows/phase-2a-context.yml"
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout LeanMoE
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned llama.cpp
+        shell: pwsh
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git external/llama.cpp
+          git -C external/llama.cpp checkout --detach cea74625f
+
+          $actual = git -C external/llama.cpp rev-parse --short HEAD
+
+          if ($actual -ne "cea74625f") {
+              throw "Wrong llama.cpp revision: $actual"
+          }
+
+          Write-Host "Pinned llama.cpp revision: $actual"
+
+      - name: Setup CUDA 13.4
+        uses: ./external/llama.cpp/.github/actions/windows-setup-cuda
+        with:
+          cuda_version: "13.4"
+          cuda_arch: "x64"
+
+      - name: Verify CUDA
+        shell: pwsh
+        run: |
+          nvcc --version
+
+          if (-not $env:CUDA_PATH) {
+              throw "CUDA_PATH is not defined"
+          }
+
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+
+      - name: Install Ninja
+        shell: pwsh
+        run: |
+          choco install ninja -y
+          ninja --version
+
+      - name: Configure CUDA bridge
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+          cmake -S native/bridge -B build/bridge -G "Ninja Multi-Config" ^
+            -DLLAMA_CPP_DIR="${{ github.workspace }}/external/llama.cpp" ^
+            -DGGML_CUDA=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DCMAKE_CUDA_ARCHITECTURES=89
+
+      - name: Build CUDA bridge
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+          cmake --build build/bridge ^
+            --config Release ^
+            --target leanmoe_bridge ^
+            --parallel 4
+
+      - name: Collect CUDA runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/runtime | Out-Null
+
+          $required = @(
+              "leanmoe_bridge.dll",
+              "llama.dll",
+              "ggml.dll",
+              "ggml-base.dll",
+              "ggml-cuda.dll"
+          )
+
+          foreach ($name in $required) {
+              $file = Get-ChildItem build/bridge `
+                  -Recurse `
+                  -Filter $name |
+                  Select-Object -First 1
+
+              if (-not $file) {
+                  throw "$name not found"
+              }
+
+              Copy-Item $file.FullName artifacts/runtime/
+          }
+
+          Get-ChildItem build/bridge `
+              -Recurse `
+              -Filter "ggml-cpu*.dll" |
+              ForEach-Object {
+                  Copy-Item $_.FullName artifacts/runtime/
+              }
+
+          $cudaNames = @(
+              "cudart64_13.dll",
+              "cublas64_13.dll",
+              "cublasLt64_13.dll"
+          )
+
+          foreach ($name in $cudaNames) {
+              $file = Get-ChildItem $env:CUDA_PATH `
+                  -Recurse `
+                  -Filter $name `
+                  -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+
+              if (-not $file) {
+                  throw "CUDA runtime dependency not found: $name"
+              }
+
+              Copy-Item $file.FullName artifacts/runtime/
+          }
+
+          Write-Host ""
+          Write-Host "=== LeanMoE CUDA Runtime ==="
+
+          Get-ChildItem artifacts/runtime |
+              Select-Object Name, Length
+
+      - name: Upload CUDA runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: leanmoe-phase-2a-context-win64
+          path: artifacts/runtime/
+          if-no-files-found: error
+
+
+

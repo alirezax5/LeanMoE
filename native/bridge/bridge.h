@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 1u
+#define LM_BRIDGE_API_VERSION 2u
 
 typedef void * lm_model_t;
 
@@ -74,6 +74,51 @@ LM_API void lm_model_free(
     lm_model_t model
 );
 
+
+/* Context */
+
+typedef void * lm_context_t;
+
+typedef enum lm_kv_type {
+    LM_KV_F16  = 0,
+    LM_KV_Q8_0 = 1
+} lm_kv_type;
+
+typedef struct lm_context_config {
+    uint32_t n_ctx;
+    uint32_t n_batch;
+    uint32_t n_ubatch;
+
+    lm_kv_type type_k;
+    lm_kv_type type_v;
+
+    uint8_t flash_attn;
+    uint8_t offload_kqv;
+
+    uint8_t reserved[6];
+} lm_context_config;
+
+LM_API lm_result lm_context_create(
+    lm_model_t model,
+    const lm_context_config * config,
+    lm_context_t * out_context
+);
+
+LM_API void lm_context_free(
+    lm_context_t context
+);
+
+LM_API uint32_t lm_context_n_ctx(
+    lm_context_t context
+);
+
+LM_API uint32_t lm_context_n_batch(
+    lm_context_t context
+);
+
+LM_API uint32_t lm_context_n_ubatch(
+    lm_context_t context
+);
 
 /* Metadata */
 
