@@ -67,11 +67,13 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES=89
 
       - name: Build CUDA bridge
-        shell: pwsh
+        shell: cmd
         run: |
-          cmake --build build/bridge `
-            --config Release `
-            --target leanmoe_bridge `
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+          cmake --build build/bridge ^
+            --config Release ^
+            --target leanmoe_bridge ^
             --parallel 4
 
       - name: Collect CUDA runtime
@@ -139,4 +141,5 @@ jobs:
           name: leanmoe-phase-1c-cuda-win64
           path: artifacts/runtime/
           if-no-files-found: error
+
 
