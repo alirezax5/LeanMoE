@@ -1,4 +1,4 @@
-﻿#define LEANMOE_BRIDGE_BUILD
+#define LEANMOE_BRIDGE_BUILD
 #include "bridge.h"
 
 #include "llama.h"
@@ -6,6 +6,7 @@
 #include <exception>
 #include <new>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -120,9 +121,52 @@ lm_result lm_model_load(
         params.n_gpu_layers = config->n_gpu_layers;
 
         /*
+         * Match llama.cpp --n-cpu-moe semantics:
+         * keep expert tensors for the first N transformer blocks on CPU.
+         *
+         * The pattern matches upstream LLM_FFN_EXPS_REGEX:
+         * \.ffn_(up|down|gate|gate_up)_(ch|)exps
+         */
+        std::vector<std::string> cpu_moe_patterns;
+        std::vector<llama_model_tensor_buft_override> tensor_overrides;
+
+        if (config->n_cpu_moe < -1) {
+            set_error("n_cpu_moe must be -1 or greater");
+            return LM_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (config->n_cpu_moe > 0) {
+            cpu_moe_patterns.reserve(
+                static_cast<size_t>(config->n_cpu_moe)
+            );
+
+            tensor_overrides.reserve(
+                static_cast<size_t>(config->n_cpu_moe) + 1
+            );
+
+            for (int32_t i = 0; i < config->n_cpu_moe; ++i) {
+                cpu_moe_patterns.push_back(
+                    "blk\\." + std::to_string(i) +
+                    "\\.ffn_(up|down|gate|gate_up)_(ch|)exps"
+                );
+            }
+
+            for (const std::string & pattern : cpu_moe_patterns) {
+                tensor_overrides.push_back({
+                    pattern.c_str(),
+                    ggml_backend_cpu_buffer_type()
+                });
+            }
+
+            tensor_overrides.push_back({nullptr, nullptr});
+
+            params.tensor_buft_overrides =
+                tensor_overrides.data();
+        }
+
+        /*
          * NOT mapped in Phase 1B:
          *
-         * config->n_cpu_moe
          * config->use_mmap
          * config->use_mlock
          *
