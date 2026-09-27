@@ -1,0 +1,135 @@
+﻿name: Phase 1C - Windows CUDA Runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - phase-1c-cuda
+    paths:
+      - "native/bridge/**"
+      - "tests/native/**"
+      - ".github/workflows/phase-1c-cuda.yml"
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout LeanMoE
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned llama.cpp
+        shell: pwsh
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git external/llama.cpp
+          git -C external/llama.cpp checkout --detach cea74625f
+
+          $actual = git -C external/llama.cpp rev-parse --short HEAD
+
+          if ($actual -ne "cea74625f") {
+              throw "Wrong llama.cpp revision: $actual"
+          }
+
+          Write-Host "Pinned llama.cpp revision: $actual"
+
+      - name: Setup CUDA 13.4
+        uses: ./external/llama.cpp/.github/actions/windows-setup-cuda
+        with:
+          cuda_version: "13.4"
+          cuda_arch: "x64"
+
+      - name: Verify CUDA
+        shell: pwsh
+        run: |
+          nvcc --version
+
+          if (-not $env:CUDA_PATH) {
+              throw "CUDA_PATH is not defined"
+          }
+
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+
+      - name: Configure CUDA bridge
+        shell: pwsh
+        run: |
+          cmake `
+            -S native/bridge `
+            -B build/bridge `
+            -DLLAMA_CPP_DIR="${{ github.workspace }}/external/llama.cpp" `
+            -DGGML_CUDA=ON `
+            -DGGML_NATIVE=OFF `
+            -DCMAKE_CUDA_ARCHITECTURES=89
+
+      - name: Build CUDA bridge
+        shell: pwsh
+        run: |
+          cmake --build build/bridge `
+            --config Release `
+            --target leanmoe_bridge `
+            --parallel 4
+
+      - name: Collect CUDA runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/runtime | Out-Null
+
+          $required = @(
+              "leanmoe_bridge.dll",
+              "llama.dll",
+              "ggml.dll",
+              "ggml-base.dll",
+              "ggml-cuda.dll"
+          )
+
+          foreach ($name in $required) {
+              $file = Get-ChildItem build/bridge `
+                  -Recurse `
+                  -Filter $name |
+                  Select-Object -First 1
+
+              if (-not $file) {
+                  throw "$name not found"
+              }
+
+              Copy-Item $file.FullName artifacts/runtime/
+          }
+
+          Get-ChildItem build/bridge `
+              -Recurse `
+              -Filter "ggml-cpu*.dll" |
+              ForEach-Object {
+                  Copy-Item $_.FullName artifacts/runtime/
+              }
+
+          $cudaNames = @(
+              "cudart64_13.dll",
+              "cublas64_13.dll",
+              "cublasLt64_13.dll"
+          )
+
+          foreach ($name in $cudaNames) {
+              $file = Get-ChildItem $env:CUDA_PATH `
+                  -Recurse `
+                  -Filter $name `
+                  -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+
+              if (-not $file) {
+                  throw "CUDA runtime dependency not found: $name"
+              }
+
+              Copy-Item $file.FullName artifacts/runtime/
+          }
+
+          Write-Host ""
+          Write-Host "=== LeanMoE CUDA Runtime ==="
+
+          Get-ChildItem artifacts/runtime |
+              Select-Object Name, Length
+
+      - name: Upload CUDA runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: leanmoe-phase-1c-cuda-win64
+          path: artifacts/runtime/
+          if-no-files-found: error

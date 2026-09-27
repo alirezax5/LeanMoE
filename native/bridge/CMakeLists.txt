@@ -23,10 +23,12 @@ set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 
-# Phase 1B is an ABI/model-load smoke build.
-# CUDA is deliberately disabled in CI because GitHub-hosted
-# Windows runners do not provide our target NVIDIA GPU.
-set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+# Backend selection is controlled by the caller.
+# Phase 1B defaults to CPU-only.
+# Phase 1C explicitly enables CUDA for the Windows CUDA runtime build.
+if(NOT DEFINED GGML_CUDA)
+    set(GGML_CUDA OFF CACHE BOOL "")
+endif()
 
 add_subdirectory(
     "${LLAMA_CPP_DIR}"
@@ -68,3 +70,5 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME "leanmoe_bridge"
 )
+
+
