@@ -318,8 +318,10 @@ lm_result lm_context_create(
                 return LM_ERROR_INVALID_ARGUMENT;
         }
 
-        params.flash_attn =
-            config->flash_attn != 0;
+        params.flash_attn_type =
+    config->flash_attn
+        ? LLAMA_FLASH_ATTN_TYPE_ENABLED
+        : LLAMA_FLASH_ATTN_TYPE_DISABLED;
 
         params.offload_kqv =
             config->offload_kqv != 0;
