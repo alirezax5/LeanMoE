@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+
+runtime/*.dll
+runtime/*.exe
+
+logs/*
+reports/*
+
+!logs/.gitkeep
+!reports/.gitkeep
