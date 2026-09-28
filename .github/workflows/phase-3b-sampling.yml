@@ -153,6 +153,37 @@ jobs:
             Write-Host "[PASS] export $symbol"
           }
 
+      - name: Locate external runtime dependencies
+        shell: pwsh
+        run: |
+          $runtimeSource = Join-Path $PWD "build/phase3b-runtime-deps"
+          New-Item -ItemType Directory -Force $runtimeSource | Out-Null
+
+          # v4 proved ggml-cuda.dll is the first DLL that cannot load and
+          # dumpbin shows a direct dependency on cublas64_13.dll.
+          $cublas = Get-ChildItem $env:CUDA_PATH -Recurse -File -Filter "cublas64_13.dll" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $cublas) {
+            throw "Required CUDA runtime DLL not found under CUDA_PATH: cublas64_13.dll"
+          }
+          Copy-Item $cublas.FullName -Destination (Join-Path $runtimeSource "cublas64_13.dll") -Force
+          Write-Host "[PASS] cublas64_13.dll <- $($cublas.FullName)"
+
+          # dumpbin also shows ggml-base/ggml-cpu depend on VCOMP140.DLL.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstall = (& $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath).Trim()
+
+          $vcomp = Get-ChildItem $vsInstall -Recurse -File -Filter "vcomp140.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\Redist\\MSVC\\" -and $_.FullName -match "\\x64\\" } |
+            Select-Object -First 1
+          if (-not $vcomp) {
+            throw "Required MSVC OpenMP runtime vcomp140.dll not found"
+          }
+          Copy-Item $vcomp.FullName -Destination (Join-Path $runtimeSource "vcomp140.dll") -Force
+          Write-Host "[PASS] vcomp140.dll <- $($vcomp.FullName)"
+
       - name: Stage runtime DLLs
         shell: pwsh
         run: |
@@ -169,6 +200,11 @@ jobs:
           foreach ($dll in $dlls) {
             Copy-Item $dll.FullName -Destination (Join-Path $stage $dll.Name) -Force
           }
+
+          Get-ChildItem (Join-Path $PWD "build/phase3b-runtime-deps") -File -Filter "*.dll" |
+            ForEach-Object {
+              Copy-Item $_.FullName -Destination (Join-Path $stage $_.Name) -Force
+            }
 
           Copy-Item native/bridge/bridge.h -Destination $stage
           Copy-Item build/phase3b-api/bridge-exports.txt -Destination $stage
