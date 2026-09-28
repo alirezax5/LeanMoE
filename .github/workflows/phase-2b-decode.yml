@@ -2,6 +2,7 @@ name: Phase 2B - Windows Decode Compile Gate
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - phase-2b-decode
@@ -88,36 +89,61 @@ jobs:
             /Fo:build\phase2b_api_compile.obj
 
       - name: Verify Bridge API v3 exports
-        shell: pwsh
+        shell: cmd
         run: |
-          $dll = Get-ChildItem build/bridge `
-              -Recurse `
-              -Filter "leanmoe_bridge.dll" |
-              Select-Object -First 1
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
 
-          if (-not $dll) {
-              throw "leanmoe_bridge.dll not found"
-          }
+          set "BRIDGE_DLL="
 
-          $dumpbin = Get-Command dumpbin.exe -ErrorAction Stop
-          $exports = & $dumpbin.Source /exports $dll.FullName | Out-String
-
-          $required = @(
-              "lm_api_version",
-              "lm_vocab_size",
-              "lm_tokenize",
-              "lm_decode_tokens",
-              "lm_argmax_token",
-              "lm_token_to_piece"
+          for /f "delims=" %%F in ('dir /s /b build\bridge\leanmoe_bridge.dll 2^>nul') do (
+            set "BRIDGE_DLL=%%F"
+            goto :bridge_found
           )
 
-          foreach ($name in $required) {
-              if ($exports -notmatch "(?m)\b$([regex]::Escape($name))\b") {
-                  throw "Missing Bridge API v3 export: $name"
-              }
+          echo ERROR: leanmoe_bridge.dll not found
+          exit /b 1
 
-              Write-Host "[PASS] export: $name"
-          }
+          :bridge_found
+          echo Bridge DLL: %BRIDGE_DLL%
+
+          dumpbin /exports "%BRIDGE_DLL%" > build\bridge-exports.txt
+
+          if errorlevel 1 (
+            echo ERROR: dumpbin failed
+            exit /b 1
+          )
+
+          findstr /R /C:"[ ]lm_api_version$" build\bridge-exports.txt >nul || (
+            echo ERROR: Missing Bridge API v3 export: lm_api_version
+            exit /b 1
+          )
+
+          findstr /R /C:"[ ]lm_vocab_size$" build\bridge-exports.txt >nul || (
+            echo ERROR: Missing Bridge API v3 export: lm_vocab_size
+            exit /b 1
+          )
+
+          findstr /R /C:"[ ]lm_tokenize$" build\bridge-exports.txt >nul || (
+            echo ERROR: Missing Bridge API v3 export: lm_tokenize
+            exit /b 1
+          )
+
+          findstr /R /C:"[ ]lm_decode_tokens$" build\bridge-exports.txt >nul || (
+            echo ERROR: Missing Bridge API v3 export: lm_decode_tokens
+            exit /b 1
+          )
+
+          findstr /R /C:"[ ]lm_argmax_token$" build\bridge-exports.txt >nul || (
+            echo ERROR: Missing Bridge API v3 export: lm_argmax_token
+            exit /b 1
+          )
+
+          findstr /R /C:"[ ]lm_token_to_piece$" build\bridge-exports.txt >nul || (
+            echo ERROR: Missing Bridge API v3 export: lm_token_to_piece
+            exit /b 1
+          )
+
+          echo [PASS] Bridge API v3 exports verified
 
       - name: Collect CUDA runtime
         shell: pwsh
@@ -176,6 +202,7 @@ jobs:
           Write-Host "=== LeanMoE Phase 2B CUDA Runtime ==="
 
           Get-ChildItem artifacts/runtime |
+              Sort-Object Name |
               Select-Object Name, Length
 
       - name: Upload CUDA runtime
