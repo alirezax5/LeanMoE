@@ -57,12 +57,14 @@ target_include_directories(
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${LLAMA_CPP_DIR}/include"
+        "${LLAMA_CPP_DIR}/common"
 )
 
 target_link_libraries(
     leanmoe_bridge
     PRIVATE
         llama
+        llama-common
 )
 
 set_target_properties(
