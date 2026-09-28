@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 4u
+#define LM_BRIDGE_API_VERSION 5u
 
 typedef void * lm_model_t;
 
@@ -249,6 +249,36 @@ LM_API lm_result lm_sampler_sample(
 
 LM_API lm_result lm_sampler_reset(
     lm_sampler_t sampler
+);
+
+
+
+/* Chat templates — Bridge API v5 */
+
+typedef struct lm_chat_message {
+    const char * role_utf8;
+    const char * content_utf8;
+} lm_chat_message;
+
+/*
+ * Apply the model's embedded chat template using llama.cpp common/Jinja.
+ *
+ * If buffer is NULL or buffer_size is too small:
+ *   returns LM_ERROR_BUFFER_TOO_SMALL and writes the required byte count
+ *   (excluding the optional NUL terminator) to out_size.
+ *
+ * add_generation_prompt != 0 requests the assistant generation prefix.
+ * enable_thinking controls the Jinja template's thinking flag when supported.
+ */
+LM_API lm_result lm_chat_apply_template(
+    lm_model_t model,
+    const lm_chat_message * messages,
+    int32_t message_count,
+    uint8_t add_generation_prompt,
+    uint8_t enable_thinking,
+    char * buffer,
+    int32_t buffer_size,
+    int32_t * out_size
 );
 
 

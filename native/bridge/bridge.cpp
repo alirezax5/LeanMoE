@@ -2,8 +2,11 @@
 #include "bridge.h"
 
 #include "llama.h"
+#include "chat.h"
 
 #include <exception>
+#include <cstring>
+#include <utility>
 #include <limits>
 #include <new>
 #include <string>
@@ -992,6 +995,108 @@ lm_result lm_sampler_reset(lm_sampler_t sampler) {
     }
     catch (...) {
         set_error("Unknown exception while resetting sampler");
+        return LM_ERROR_BACKEND;
+    }
+}
+
+
+
+lm_result lm_chat_apply_template(
+    lm_model_t model,
+    const lm_chat_message * messages,
+    int32_t message_count,
+    uint8_t add_generation_prompt,
+    uint8_t enable_thinking,
+    char * buffer,
+    int32_t buffer_size,
+    int32_t * out_size
+) {
+    clear_error();
+
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (model == nullptr ||
+        message_count <= 0 ||
+        messages == nullptr ||
+        buffer_size < 0 ||
+        out_size == nullptr) {
+        set_error("Invalid chat template argument");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    lm_model_wrapper * wrapper =
+        static_cast<lm_model_wrapper *>(model);
+
+    if (wrapper->model == nullptr) {
+        set_error("Internal llama model pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    try {
+        std::vector<common_chat_msg> chat_messages;
+        chat_messages.reserve(static_cast<size_t>(message_count));
+
+        for (int32_t i = 0; i < message_count; ++i) {
+            if (messages[i].role_utf8 == nullptr ||
+                messages[i].content_utf8 == nullptr) {
+                set_error("Chat message role/content is null");
+                return LM_ERROR_INVALID_ARGUMENT;
+            }
+
+            common_chat_msg msg;
+            msg.role = messages[i].role_utf8;
+            msg.content = messages[i].content_utf8;
+            chat_messages.push_back(std::move(msg));
+        }
+
+        auto templates =
+            common_chat_templates_init(wrapper->model, "");
+
+        if (!templates) {
+            set_error("common_chat_templates_init() returned null");
+            return LM_ERROR_INTERNAL;
+        }
+
+        common_chat_templates_inputs inputs;
+        inputs.messages = std::move(chat_messages);
+        inputs.add_generation_prompt = add_generation_prompt != 0;
+        inputs.use_jinja = true;
+        inputs.enable_thinking = enable_thinking != 0;
+
+        const common_chat_params params =
+            common_chat_templates_apply(templates.get(), inputs);
+
+        if (params.prompt.size() >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            set_error("Formatted chat prompt is too large");
+            return LM_ERROR_INTERNAL;
+        }
+
+        *out_size = static_cast<int32_t>(params.prompt.size());
+
+        if (buffer == nullptr || buffer_size <= *out_size) {
+            return LM_ERROR_BUFFER_TOO_SMALL;
+        }
+
+        if (*out_size > 0) {
+            std::memcpy(buffer, params.prompt.data(), params.prompt.size());
+        }
+        buffer[*out_size] = '\0';
+        return LM_OK;
+    }
+    catch (const std::bad_alloc &) {
+        set_error("Out of memory while applying chat template");
+        return LM_ERROR_OUT_OF_MEMORY;
+    }
+    catch (const std::exception & exc) {
+        set_error(exc.what());
+        return LM_ERROR_BACKEND;
+    }
+    catch (...) {
+        set_error("Unknown exception while applying chat template");
         return LM_ERROR_BACKEND;
     }
 }

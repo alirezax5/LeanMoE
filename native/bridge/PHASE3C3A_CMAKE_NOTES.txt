@@ -1,0 +1,14 @@
+# Phase 3C.3A CMake requirement
+#
+# Add llama.cpp common include path and link target to the existing bridge target.
+# Keep your existing target name if it differs.
+#
+# target_include_directories(leanmoe_bridge PRIVATE
+#     "${LLAMA_CPP_DIR}/include"
+#     "${LLAMA_CPP_DIR}/common"
+# )
+# target_link_libraries(leanmoe_bridge PRIVATE llama llama-common)
+#
+# IMPORTANT:
+# Build target `llama-common` in the pinned llama.cpp tree. Do not copy a master
+# chat.cpp/chat.h into the pinned checkout.

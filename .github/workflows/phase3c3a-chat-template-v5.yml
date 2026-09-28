@@ -1,0 +1,54 @@
+name: phase-3c3a-chat-template-v5
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-cuda:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout pinned llama.cpp
+        shell: pwsh
+        run: |
+          if (-not (Test-Path external/llama.cpp/.git)) {
+            git clone https://github.com/ggml-org/llama.cpp.git external/llama.cpp
+          }
+          git -C external/llama.cpp fetch origin cea74625f
+          git -C external/llama.cpp checkout --detach cea74625f
+
+      - name: Setup CUDA 13.4
+        uses: ./external/llama.cpp/.github/actions/windows-setup-cuda
+        with:
+          cuda_version: "13.4"
+          cuda_arch: "x64"
+
+      - name: Enter MSVC environment and configure
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSROOT=%%i
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -S native/bridge -B build/bridge -G "Ninja Multi-Config" -DLLAMA_CPP_DIR="%GITHUB_WORKSPACE%\external\llama.cpp" -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=89
+          cmake --build build/bridge --config Release
+
+      - name: Verify API v5 exports
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem build/bridge -Recurse -Filter leanmoe_bridge.dll | Select-Object -First 1
+          if (-not $dll) { throw "leanmoe_bridge.dll not found" }
+          dumpbin /exports $dll.FullName | Out-File bridge-exports.txt
+          $e = Get-Content bridge-exports.txt -Raw
+          foreach ($name in @("lm_api_version","lm_chat_apply_template","lm_sampler_create","lm_sampler_sample")) {
+            if ($e -notmatch $name) { throw "Missing export: $name" }
+          }
+          Write-Host "[PASS] Bridge API v5 exports present"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leanmoe-phase3c3a-bridge-v5
+          path: |
+            build/bridge/**/leanmoe_bridge.dll
+            bridge-exports.txt
