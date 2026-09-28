@@ -30,6 +30,10 @@ struct lm_context_wrapper {
     llama_context * context = nullptr;
 };
 
+struct lm_sampler_wrapper {
+    llama_sampler * sampler = nullptr;
+};
+
 } // namespace
 
 
@@ -740,6 +744,258 @@ lm_result lm_token_to_piece(
 
     return LM_OK;
 }
+
+
+lm_result lm_sampler_create(
+    const lm_sampler_config * config,
+    lm_sampler_t * out_sampler
+) {
+    clear_error();
+
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (config == nullptr || out_sampler == nullptr) {
+        set_error("Invalid sampler create argument");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    *out_sampler = nullptr;
+
+    if (config->greedy == 0) {
+        if (!(config->temperature > 0.0f)) {
+            set_error("temperature must be > 0 for non-greedy sampling");
+            return LM_ERROR_INVALID_ARGUMENT;
+        }
+        if (!(config->top_p > 0.0f && config->top_p <= 1.0f)) {
+            set_error("top_p must be in (0, 1]");
+            return LM_ERROR_INVALID_ARGUMENT;
+        }
+        if (!(config->min_p >= 0.0f && config->min_p <= 1.0f)) {
+            set_error("min_p must be in [0, 1]");
+            return LM_ERROR_INVALID_ARGUMENT;
+        }
+    }
+
+    llama_sampler * chain = nullptr;
+
+    try {
+        chain = llama_sampler_chain_init(
+            llama_sampler_chain_default_params()
+        );
+
+        if (chain == nullptr) {
+            set_error("llama_sampler_chain_init() returned null");
+            return LM_ERROR_OUT_OF_MEMORY;
+        }
+
+        if (config->greedy != 0) {
+            llama_sampler * greedy = llama_sampler_init_greedy();
+            if (greedy == nullptr) {
+                llama_sampler_free(chain);
+                set_error("llama_sampler_init_greedy() returned null");
+                return LM_ERROR_OUT_OF_MEMORY;
+            }
+            llama_sampler_chain_add(chain, greedy);
+        } else {
+            if (config->top_k > 0) {
+                llama_sampler * s = llama_sampler_init_top_k(config->top_k);
+                if (s == nullptr) {
+                    llama_sampler_free(chain);
+                    set_error("llama_sampler_init_top_k() returned null");
+                    return LM_ERROR_OUT_OF_MEMORY;
+                }
+                llama_sampler_chain_add(chain, s);
+            }
+
+            if (config->top_p < 1.0f) {
+                llama_sampler * s = llama_sampler_init_top_p(config->top_p, 1);
+                if (s == nullptr) {
+                    llama_sampler_free(chain);
+                    set_error("llama_sampler_init_top_p() returned null");
+                    return LM_ERROR_OUT_OF_MEMORY;
+                }
+                llama_sampler_chain_add(chain, s);
+            }
+
+            if (config->min_p > 0.0f) {
+                llama_sampler * s = llama_sampler_init_min_p(config->min_p, 1);
+                if (s == nullptr) {
+                    llama_sampler_free(chain);
+                    set_error("llama_sampler_init_min_p() returned null");
+                    return LM_ERROR_OUT_OF_MEMORY;
+                }
+                llama_sampler_chain_add(chain, s);
+            }
+
+            llama_sampler * temp =
+                llama_sampler_init_temp(config->temperature);
+            if (temp == nullptr) {
+                llama_sampler_free(chain);
+                set_error("llama_sampler_init_temp() returned null");
+                return LM_ERROR_OUT_OF_MEMORY;
+            }
+            llama_sampler_chain_add(chain, temp);
+
+            llama_sampler * dist =
+                llama_sampler_init_dist(config->seed);
+            if (dist == nullptr) {
+                llama_sampler_free(chain);
+                set_error("llama_sampler_init_dist() returned null");
+                return LM_ERROR_OUT_OF_MEMORY;
+            }
+            llama_sampler_chain_add(chain, dist);
+        }
+
+        lm_sampler_wrapper * wrapper = nullptr;
+        try {
+            wrapper = new lm_sampler_wrapper();
+        }
+        catch (const std::bad_alloc &) {
+            llama_sampler_free(chain);
+            set_error("Failed to allocate LeanMoE sampler wrapper");
+            return LM_ERROR_OUT_OF_MEMORY;
+        }
+
+        wrapper->sampler = chain;
+        *out_sampler = static_cast<lm_sampler_t>(wrapper);
+        return LM_OK;
+    }
+    catch (const std::bad_alloc &) {
+        if (chain != nullptr) {
+            llama_sampler_free(chain);
+        }
+        set_error("Out of memory while creating sampler");
+        return LM_ERROR_OUT_OF_MEMORY;
+    }
+    catch (const std::exception & exc) {
+        if (chain != nullptr) {
+            llama_sampler_free(chain);
+        }
+        set_error(exc.what());
+        return LM_ERROR_BACKEND;
+    }
+    catch (...) {
+        if (chain != nullptr) {
+            llama_sampler_free(chain);
+        }
+        set_error("Unknown exception while creating sampler");
+        return LM_ERROR_BACKEND;
+    }
+}
+
+
+void lm_sampler_free(lm_sampler_t sampler) {
+    if (sampler == nullptr) {
+        return;
+    }
+
+    lm_sampler_wrapper * wrapper =
+        static_cast<lm_sampler_wrapper *>(sampler);
+
+    if (wrapper->sampler != nullptr) {
+        llama_sampler_free(wrapper->sampler);
+        wrapper->sampler = nullptr;
+    }
+
+    delete wrapper;
+}
+
+
+lm_result lm_sampler_sample(
+    lm_sampler_t sampler,
+    lm_context_t context,
+    lm_token * out_token
+) {
+    clear_error();
+
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (sampler == nullptr ||
+        context == nullptr ||
+        out_token == nullptr) {
+        set_error("Invalid sampler sample argument");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    lm_sampler_wrapper * sampler_wrapper =
+        static_cast<lm_sampler_wrapper *>(sampler);
+
+    lm_context_wrapper * context_wrapper =
+        static_cast<lm_context_wrapper *>(context);
+
+    if (sampler_wrapper->sampler == nullptr ||
+        context_wrapper->context == nullptr) {
+        set_error("Internal sampler or context pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    try {
+        /*
+         * In pinned llama.cpp cea74625f, llama_sampler_sample()
+         * applies the chain, selects the token, and accepts it internally.
+         */
+        const llama_token token =
+            llama_sampler_sample(
+                sampler_wrapper->sampler,
+                context_wrapper->context,
+                -1
+            );
+
+        *out_token = static_cast<lm_token>(token);
+        return LM_OK;
+    }
+    catch (const std::exception & exc) {
+        set_error(exc.what());
+        return LM_ERROR_BACKEND;
+    }
+    catch (...) {
+        set_error("Unknown exception while sampling token");
+        return LM_ERROR_BACKEND;
+    }
+}
+
+
+lm_result lm_sampler_reset(lm_sampler_t sampler) {
+    clear_error();
+
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (sampler == nullptr) {
+        set_error("Sampler handle is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    lm_sampler_wrapper * wrapper =
+        static_cast<lm_sampler_wrapper *>(sampler);
+
+    if (wrapper->sampler == nullptr) {
+        set_error("Internal llama sampler pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    try {
+        llama_sampler_reset(wrapper->sampler);
+        return LM_OK;
+    }
+    catch (const std::exception & exc) {
+        set_error(exc.what());
+        return LM_ERROR_BACKEND;
+    }
+    catch (...) {
+        set_error("Unknown exception while resetting sampler");
+        return LM_ERROR_BACKEND;
+    }
+}
+
 
 uint64_t lm_model_size(lm_model_t model) {
     if (model == nullptr) {

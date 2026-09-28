@@ -1,0 +1,165 @@
+name: Phase 3B - Sampling Bridge v4
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - phase-3b-sampling
+    paths:
+      - "native/bridge/**"
+      - "tests/native/phase3b_api_compile.cpp"
+      - ".github/workflows/phase-3b-sampling.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-cuda:
+    name: Windows CUDA 13.4 / Bridge API v4
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    env:
+      LLAMA_CPP_COMMIT: cea74625f
+
+    steps:
+      - name: Checkout LeanMoE
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned llama.cpp
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none https://github.com/ggml-org/llama.cpp.git external/llama.cpp
+          git -C external/llama.cpp checkout $env:LLAMA_CPP_COMMIT
+          $actual = (git -C external/llama.cpp rev-parse HEAD).Trim()
+          Write-Host "Pinned llama.cpp: $actual"
+          if (-not $actual.StartsWith($env:LLAMA_CPP_COMMIT)) {
+            throw "Pinned llama.cpp commit mismatch"
+          }
+
+      - name: Setup CUDA 13.4
+        uses: ./external/llama.cpp/.github/actions/windows-setup-cuda
+        with:
+          cuda_version: "13.4"
+          cuda_arch: "x64"
+
+      - name: Configure bridge
+        shell: cmd
+        run: >
+          cmake -S native/bridge -B build/bridge -G "Ninja Multi-Config"
+          -DLLAMA_CPP_DIR="${{ github.workspace }}/external/llama.cpp"
+          -DGGML_CUDA=ON
+          -DGGML_NATIVE=OFF
+          -DCMAKE_CUDA_ARCHITECTURES=89
+
+      - name: Build bridge
+        shell: cmd
+        run: cmake --build build/bridge --config Release --target leanmoe_bridge --parallel 4
+
+      - name: Locate bridge DLL
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem build/bridge -Recurse -Filter "leanmoe_bridge.dll" |
+            Select-Object -First 1
+          if (-not $dll) {
+            throw "leanmoe_bridge.dll not found"
+          }
+          "LEANMOE_BRIDGE_DLL=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "LEANMOE_BRIDGE_DIR=$($dll.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Bridge: $($dll.FullName)"
+
+      - name: Compile Phase 3B API surface
+        shell: pwsh
+        run: |
+          $cl = Get-Command cl.exe -ErrorAction Stop
+          New-Item -ItemType Directory -Force build/phase3b-api | Out-Null
+
+          & $cl.Source /nologo /std:c++17 /EHsc /c `
+            /I native/bridge `
+            tests/native/phase3b_api_compile.cpp `
+            /Fo:build/phase3b-api/phase3b_api_compile.obj
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Phase 3B API compile gate failed"
+          }
+
+      - name: Verify exported v4 sampler symbols
+        shell: pwsh
+        run: |
+          $dumpbin = Get-Command dumpbin.exe -ErrorAction Stop
+          $exports = & $dumpbin.Source /exports $env:LEANMOE_BRIDGE_DLL
+          $exports | Out-File build/phase3b-api/bridge-exports.txt
+
+          $required = @(
+            "lm_api_version",
+            "lm_sampler_create",
+            "lm_sampler_free",
+            "lm_sampler_sample",
+            "lm_sampler_reset"
+          )
+
+          foreach ($symbol in $required) {
+            if (-not ($exports | Select-String -SimpleMatch $symbol)) {
+              throw "Missing exported symbol: $symbol"
+            }
+            Write-Host "[PASS] export $symbol"
+          }
+
+      - name: Stage runtime DLLs
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD "artifact/phase-3b-sampling-win64"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+
+          # Keep only runtime DLLs from the bridge build tree. This avoids
+          # committing or packaging unrelated local DLLs from the repository.
+          $dlls = Get-ChildItem build/bridge -Recurse -Filter "*.dll" |
+            Sort-Object FullName -Unique
+
+          if (-not $dlls) {
+            throw "No runtime DLLs found"
+          }
+
+          foreach ($dll in $dlls) {
+            Copy-Item $dll.FullName -Destination (Join-Path $stage $dll.Name) -Force
+          }
+
+          Copy-Item native/bridge/bridge.h -Destination $stage
+          Copy-Item build/phase3b-api/bridge-exports.txt -Destination $stage
+
+          Write-Host "Staged runtime:"
+          Get-ChildItem $stage | Format-Table Name,Length
+
+      - name: Verify Bridge API v4 at runtime
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD "artifact/phase-3b-sampling-win64"
+          $env:PATH = "$stage;$env:PATH"
+          $env:LEANMOE_STAGE = $stage
+
+          @'
+          import ctypes
+          import os
+          from pathlib import Path
+
+          stage = Path(os.environ["LEANMOE_STAGE"]).resolve()
+          os.add_dll_directory(str(stage))
+          dll = ctypes.CDLL(str(stage / "leanmoe_bridge.dll"))
+          dll.lm_api_version.argtypes = []
+          dll.lm_api_version.restype = ctypes.c_uint32
+          api = int(dll.lm_api_version())
+          print(f"LeanMoE Bridge API: {api}")
+          if api != 4:
+              raise SystemExit(f"Expected Bridge API 4, got {api}")
+          print("[PASS] Bridge API v4 runtime check")
+          '@ | Set-Content -Encoding UTF8 build/phase3b-api/check_api.py
+
+          python build/phase3b-api/check_api.py
+
+      - name: Upload Phase 3B runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: leanmoe-phase-3b-sampling-win64
+          path: artifact/phase-3b-sampling-win64/
+          if-no-files-found: error
+          retention-days: 14

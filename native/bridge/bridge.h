@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 3u
+#define LM_BRIDGE_API_VERSION 4u
 
 typedef void * lm_model_t;
 
@@ -191,6 +191,66 @@ LM_API lm_result lm_token_to_piece(
     int32_t buffer_size,
     int32_t * out_size
 );
+
+
+/* Sampling — Bridge API v4 */
+
+typedef void * lm_sampler_t;
+
+typedef struct lm_sampler_config {
+    float temperature;
+    int32_t top_k;
+    float top_p;
+    float min_p;
+    uint32_t seed;
+
+    /*
+     * If non-zero, use llama_sampler_init_greedy() and ignore
+     * temperature/top-k/top-p/min-p/seed for token selection.
+     */
+    uint8_t greedy;
+
+    uint8_t reserved[7];
+} lm_sampler_config;
+
+/*
+ * Create a native llama.cpp sampler chain.
+ *
+ * Non-greedy order:
+ *   top-k -> top-p -> min-p -> temperature -> dist(seed)
+ *
+ * No-op filters are omitted:
+ *   top_k <= 0
+ *   top_p >= 1.0
+ *   min_p <= 0.0
+ *
+ * temperature must be > 0 for non-greedy sampling.
+ */
+LM_API lm_result lm_sampler_create(
+    const lm_sampler_config * config,
+    lm_sampler_t * out_sampler
+);
+
+LM_API void lm_sampler_free(
+    lm_sampler_t sampler
+);
+
+/*
+ * Sample from the logits produced by the most recent decode.
+ *
+ * The pinned llama_sampler_sample() accepts the selected token internally;
+ * callers MUST NOT call llama_sampler_accept() again for the returned token.
+ */
+LM_API lm_result lm_sampler_sample(
+    lm_sampler_t sampler,
+    lm_context_t context,
+    lm_token * out_token
+);
+
+LM_API lm_result lm_sampler_reset(
+    lm_sampler_t sampler
+);
+
 
 /* Metadata */
 
