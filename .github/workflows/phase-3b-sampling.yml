@@ -180,8 +180,37 @@ jobs:
         shell: pwsh
         run: |
           $stage = Join-Path $PWD "artifact/phase-3b-sampling-win64"
-          $env:PATH = "$stage;$env:PATH"
+          $bridge = Join-Path $stage "leanmoe_bridge.dll"
+
+          Write-Host "=== Staged runtime files ==="
+          Get-ChildItem $stage -File | Sort-Object Name | Format-Table Name,Length
+
+          if (-not (Test-Path $bridge)) {
+            throw "Staged leanmoe_bridge.dll is missing: $bridge"
+          }
+
+          # Show native dependencies before attempting ctypes load.
+          $cmd = @"
+          call "$env:LEANMOE_VSDEVCMD" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          dumpbin /dependents "$bridge"
+          "@
+          $cmd | Set-Content -Encoding ASCII build-phase3b-dependents.cmd
+          cmd.exe /D /S /C "build-phase3b-dependents.cmd"
+          if ($LASTEXITCODE -ne 0) {
+            throw "dumpbin /dependents failed with exit code $LASTEXITCODE"
+          }
+
+          # The staged artifact contains LeanMoE/llama/ggml runtime DLLs.
+          # CUDA runtime DLLs remain supplied by the CUDA installation.
+          $cudaBin = Join-Path $env:CUDA_PATH "bin"
+          if (-not (Test-Path $cudaBin)) {
+            throw "CUDA bin directory not found: $cudaBin"
+          }
+
+          $env:PATH = "$stage;$cudaBin;$env:PATH"
           $env:LEANMOE_STAGE = $stage
+          $env:LEANMOE_CUDA_BIN = $cudaBin
 
           @'
           import ctypes
@@ -189,15 +218,29 @@ jobs:
           from pathlib import Path
 
           stage = Path(os.environ["LEANMOE_STAGE"]).resolve()
-          os.add_dll_directory(str(stage))
-          dll = ctypes.CDLL(str(stage / "leanmoe_bridge.dll"))
-          dll.lm_api_version.argtypes = []
-          dll.lm_api_version.restype = ctypes.c_uint32
-          api = int(dll.lm_api_version())
-          print(f"LeanMoE Bridge API: {api}")
-          if api != 4:
-              raise SystemExit(f"Expected Bridge API 4, got {api}")
-          print("[PASS] Bridge API v4 runtime check")
+          cuda_bin = Path(os.environ["LEANMOE_CUDA_BIN"]).resolve()
+          bridge = stage / "leanmoe_bridge.dll"
+
+          if not bridge.is_file():
+              raise SystemExit(f"Bridge DLL missing: {bridge}")
+
+          # Python 3.8+ does not reliably use PATH alone for dependent DLL
+          # resolution. Explicitly register both runtime directories.
+          stage_cookie = os.add_dll_directory(str(stage))
+          cuda_cookie = os.add_dll_directory(str(cuda_bin))
+
+          try:
+              dll = ctypes.WinDLL(str(bridge))
+              dll.lm_api_version.argtypes = []
+              dll.lm_api_version.restype = ctypes.c_uint32
+              api = int(dll.lm_api_version())
+              print(f"LeanMoE Bridge API: {api}")
+              if api != 4:
+                  raise SystemExit(f"Expected Bridge API 4, got {api}")
+              print("[PASS] Bridge API v4 runtime check")
+          finally:
+              cuda_cookie.close()
+              stage_cookie.close()
           '@ | Set-Content -Encoding UTF8 build/phase3b-api/check_api.py
 
           python build/phase3b-api/check_api.py
