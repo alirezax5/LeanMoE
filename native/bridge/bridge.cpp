@@ -170,14 +170,12 @@ lm_result lm_model_load(
         }
 
         /*
-         * NOT mapped in Phase 1B:
-         *
-         * config->use_mmap
-         * config->use_mlock
-         *
-         * These LeanMoE settings remain reserved until their exact
-         * implementation path is defined and tested.
+         * Phase 2B.4: wire the existing LeanMoE model-load controls to the
+         * pinned llama.cpp model parameters. This is a behavioral change only;
+         * lm_model_config and the exported ABI remain unchanged (API v3).
          */
+        params.use_mmap = config->use_mmap != 0;
+        params.use_mlock = config->use_mlock != 0;
 
         llama_model * model =
             llama_model_load_from_file(path_utf8, params);

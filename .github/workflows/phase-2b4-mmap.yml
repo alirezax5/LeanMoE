@@ -1,0 +1,87 @@
+name: Phase 2B.4 mmap bridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - phase-2b4-mmap
+    paths:
+      - "native/bridge/**"
+      - "tests/native/mmap_ab_benchmark.py"
+      - ".github/workflows/phase-2b4-mmap.yml"
+
+jobs:
+  build:
+    runs-on: windows-2022
+    env:
+      LLAMA_CPP_COMMIT: cea74625f
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout pinned llama.cpp
+        shell: pwsh
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git external/llama.cpp
+          git -C external/llama.cpp checkout $env:LLAMA_CPP_COMMIT
+
+      - name: Setup CUDA 13.4
+        uses: Jimver/cuda-toolkit@v0.2.28
+        with:
+          cuda: "13.4.0"
+          method: network
+
+      - name: Configure
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S native\bridge -B build\bridge -G "Ninja Multi-Config" ^
+            -DLEANMOE_LLAMA_CPP_SOURCE_DIR=%CD%\external\llama.cpp ^
+            -DGGML_CUDA=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DCMAKE_CUDA_ARCHITECTURES=89
+
+      - name: Build Release
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake --build build\bridge --config Release --parallel 2
+
+      - name: Verify bridge exports
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          for /r build\bridge %%F in (leanmoe_bridge.dll) do dumpbin /exports "%%F" | findstr /c:"lm_model_load" /c:"lm_decode_tokens" /c:"lm_argmax_token"
+
+      - name: Collect runtime
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD "runtime-artifact"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          $dlls = Get-ChildItem -Path build\bridge -Recurse -Filter *.dll
+          foreach ($dll in $dlls) {
+            Copy-Item $dll.FullName -Destination $out -Force
+          }
+
+          $cudaBins = @()
+          if ($env:CUDA_PATH) {
+            $cudaBins += Join-Path $env:CUDA_PATH "bin"
+          }
+          foreach ($bin in $cudaBins) {
+            if (Test-Path $bin) {
+              Get-ChildItem $bin -Filter "cudart64_13.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination $out -Force
+              Get-ChildItem $bin -Filter "cublas64_13.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination $out -Force
+              Get-ChildItem $bin -Filter "cublasLt64_13.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination $out -Force
+            }
+          }
+
+          Write-Host "Collected:"
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Upload runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: leanmoe-phase-2b4-mmap-win64
+          path: runtime-artifact/*
+          if-no-files-found: error
