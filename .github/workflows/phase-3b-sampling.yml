@@ -181,55 +181,93 @@ jobs:
         run: |
           $stage = Join-Path $PWD "artifact/phase-3b-sampling-win64"
           $bridge = Join-Path $stage "leanmoe_bridge.dll"
-
-          Write-Host "=== Staged runtime files ==="
-          Get-ChildItem $stage -File | Sort-Object Name | Format-Table Name,Length
+          $cudaBin = Join-Path $env:CUDA_PATH "bin"
 
           if (-not (Test-Path $bridge)) {
             throw "Staged leanmoe_bridge.dll is missing: $bridge"
           }
-
-          # Show native dependencies before attempting ctypes load.
-          $cmd = @"
-          call "$env:LEANMOE_VSDEVCMD" -arch=x64 -host_arch=x64
-          if errorlevel 1 exit /b %errorlevel%
-          dumpbin /dependents "$bridge"
-          "@
-          $cmd | Set-Content -Encoding ASCII build-phase3b-dependents.cmd
-          cmd.exe /D /S /C "build-phase3b-dependents.cmd"
-          if ($LASTEXITCODE -ne 0) {
-            throw "dumpbin /dependents failed with exit code $LASTEXITCODE"
-          }
-
-          # The staged artifact contains LeanMoE/llama/ggml runtime DLLs.
-          # CUDA runtime DLLs remain supplied by the CUDA installation.
-          $cudaBin = Join-Path $env:CUDA_PATH "bin"
           if (-not (Test-Path $cudaBin)) {
             throw "CUDA bin directory not found: $cudaBin"
           }
 
-          $env:PATH = "$stage;$cudaBin;$env:PATH"
+          Write-Host "=== Staged runtime files ==="
+          Get-ChildItem $stage -File | Sort-Object Name | Format-Table Name,Length
+
+          # Record dependencies for every staged native DLL, not only the bridge.
+          $cmd = @"
+          call "$env:LEANMOE_VSDEVCMD" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          for %%F in ("$stage\*.dll") do (
+            echo.
+            echo ===== DEPENDENCIES: %%~nxF =====
+            dumpbin /dependents "%%~fF"
+          )
+          "@
+          $cmd | Set-Content -Encoding ASCII build-phase3b-dependents.cmd
+          cmd.exe /D /S /C "build-phase3b-dependents.cmd" |
+            Tee-Object -FilePath build/phase3b-api/all-dependents.txt
+          if ($LASTEXITCODE -ne 0) {
+            throw "Recursive dumpbin diagnostics failed with exit code $LASTEXITCODE"
+          }
+
+          # Export the exact search roots used by the Python loader diagnostic.
           $env:LEANMOE_STAGE = $stage
           $env:LEANMOE_CUDA_BIN = $cudaBin
+          $env:PATH = "$stage;$cudaBin;$env:PATH"
 
           @'
           import ctypes
           import os
+          import shutil
           from pathlib import Path
 
           stage = Path(os.environ["LEANMOE_STAGE"]).resolve()
           cuda_bin = Path(os.environ["LEANMOE_CUDA_BIN"]).resolve()
-          bridge = stage / "leanmoe_bridge.dll"
 
-          if not bridge.is_file():
-              raise SystemExit(f"Bridge DLL missing: {bridge}")
+          print("=== DLL search roots ===")
+          print("stage:", stage)
+          print("cuda :", cuda_bin)
 
-          # Python 3.8+ does not reliably use PATH alone for dependent DLL
-          # resolution. Explicitly register both runtime directories.
-          stage_cookie = os.add_dll_directory(str(stage))
-          cuda_cookie = os.add_dll_directory(str(cuda_bin))
+          cookies = [
+              os.add_dll_directory(str(stage)),
+              os.add_dll_directory(str(cuda_bin)),
+          ]
+
+          # Load dependency leaves first. This turns the generic bridge error
+          # into the exact staged DLL that cannot be loaded.
+          order = [
+              "ggml-base.dll",
+              "ggml-cpu.dll",
+              "ggml-cuda.dll",
+              "ggml.dll",
+              "llama.dll",
+              "leanmoe_bridge.dll",
+          ]
 
           try:
+              for name in order:
+                  path = stage / name
+                  if not path.is_file():
+                      raise SystemExit(f"[FAIL] staged DLL missing: {path}")
+                  try:
+                      ctypes.WinDLL(str(path))
+                  except OSError as exc:
+                      print(f"[FAIL] load {name}: {exc}")
+                      # Print common external runtime locations if present.
+                      for dep in (
+                          "MSVCP140.dll",
+                          "VCRUNTIME140.dll",
+                          "VCRUNTIME140_1.dll",
+                          "cudart64_13.dll",
+                          "cublas64_13.dll",
+                          "cublasLt64_13.dll",
+                      ):
+                          print(f"  where {dep}: {shutil.which(dep)}")
+                      raise
+                  else:
+                      print(f"[PASS] load {name}")
+
+              bridge = stage / "leanmoe_bridge.dll"
               dll = ctypes.WinDLL(str(bridge))
               dll.lm_api_version.argtypes = []
               dll.lm_api_version.restype = ctypes.c_uint32
@@ -239,8 +277,8 @@ jobs:
                   raise SystemExit(f"Expected Bridge API 4, got {api}")
               print("[PASS] Bridge API v4 runtime check")
           finally:
-              cuda_cookie.close()
-              stage_cookie.close()
+              for cookie in reversed(cookies):
+                  cookie.close()
           '@ | Set-Content -Encoding UTF8 build/phase3b-api/check_api.py
 
           python build/phase3b-api/check_api.py
