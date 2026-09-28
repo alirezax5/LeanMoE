@@ -170,12 +170,18 @@ lm_result lm_model_load(
         }
 
         /*
-         * Phase 2B.4: wire the existing LeanMoE model-load controls to the
-         * pinned llama.cpp model parameters. This is a behavioral change only;
-         * lm_model_config and the exported ABI remain unchanged (API v3).
+         * Phase 2B.4: map the existing LeanMoE mmap/mlock controls to the
+         * pinned llama.cpp load-mode API. The public LeanMoE ABI remains v3.
          */
-        params.use_mmap = config->use_mmap != 0;
-        params.use_mlock = config->use_mlock != 0;
+        if (config->use_mmap != 0) {
+            params.load_mode = config->use_mlock != 0
+                ? LLAMA_LOAD_MODE_MMAP_MLOCK
+                : LLAMA_LOAD_MODE_MMAP;
+        } else {
+            params.load_mode = config->use_mlock != 0
+                ? LLAMA_LOAD_MODE_MLOCK
+                : LLAMA_LOAD_MODE_NONE;
+        }
 
         llama_model * model =
             llama_model_load_from_file(path_utf8, params);
