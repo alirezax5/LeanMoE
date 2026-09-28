@@ -43,18 +43,57 @@ jobs:
           cuda_version: "13.4"
           cuda_arch: "x64"
 
-      - name: Configure bridge
-        shell: cmd
-        run: >
-          cmake -S native/bridge -B build/bridge -G "Ninja Multi-Config"
-          -DLLAMA_CPP_DIR="${{ github.workspace }}/external/llama.cpp"
-          -DGGML_CUDA=ON
-          -DGGML_NATIVE=OFF
-          -DCMAKE_CUDA_ARCHITECTURES=89
+      - name: Discover MSVC
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe not found"
+          }
 
-      - name: Build bridge
-        shell: cmd
-        run: cmake --build build/bridge --config Release --target leanmoe_bridge --parallel 4
+          $vsPath = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if (-not $vsPath) {
+            throw "Visual Studio C++ toolchain not found"
+          }
+
+          $devCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
+          if (-not (Test-Path $devCmd)) {
+            throw "VsDevCmd.bat not found: $devCmd"
+          }
+
+          "LEANMOE_VSDEVCMD=$devCmd" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Visual Studio: $vsPath"
+          Write-Host "VsDevCmd: $devCmd"
+
+      - name: Configure bridge with MSVC
+        shell: pwsh
+        run: |
+          $cmd = @"
+          call "$env:LEANMOE_VSDEVCMD" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          where cl
+          where nvcc
+          cmake -S native/bridge -B build/bridge -G "Ninja Multi-Config" -DLLAMA_CPP_DIR="${{ github.workspace }}/external/llama.cpp" -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=89
+          "@
+          $cmd | Set-Content -Encoding ASCII build-phase3b-configure.cmd
+          cmd.exe /D /S /C "build-phase3b-configure.cmd"
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake configure failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Build bridge with MSVC
+        shell: pwsh
+        run: |
+          $cmd = @"
+          call "$env:LEANMOE_VSDEVCMD" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build build/bridge --config Release --target leanmoe_bridge --parallel 4
+          "@
+          $cmd | Set-Content -Encoding ASCII build-phase3b-bridge.cmd
+          cmd.exe /D /S /C "build-phase3b-bridge.cmd"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bridge build failed with exit code $LASTEXITCODE"
+          }
 
       - name: Locate bridge DLL
         shell: pwsh
@@ -68,28 +107,37 @@ jobs:
           "LEANMOE_BRIDGE_DIR=$($dll.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Bridge: $($dll.FullName)"
 
-      - name: Compile Phase 3B API surface
+      - name: Compile Phase 3B API surface with MSVC
         shell: pwsh
         run: |
-          $cl = Get-Command cl.exe -ErrorAction Stop
           New-Item -ItemType Directory -Force build/phase3b-api | Out-Null
 
-          & $cl.Source /nologo /std:c++17 /EHsc /c `
-            /I native/bridge `
-            tests/native/phase3b_api_compile.cpp `
-            /Fo:build/phase3b-api/phase3b_api_compile.obj
-
+          $cmd = @"
+          call "$env:LEANMOE_VSDEVCMD" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          cl /nologo /std:c++17 /EHsc /c /I native\bridge tests\native\phase3b_api_compile.cpp /Fo:build\phase3b-api\phase3b_api_compile.obj
+          "@
+          $cmd | Set-Content -Encoding ASCII build-phase3b-api.cmd
+          cmd.exe /D /S /C "build-phase3b-api.cmd"
           if ($LASTEXITCODE -ne 0) {
-            throw "Phase 3B API compile gate failed"
+            throw "Phase 3B API compile gate failed with exit code $LASTEXITCODE"
           }
 
       - name: Verify exported v4 sampler symbols
         shell: pwsh
         run: |
-          $dumpbin = Get-Command dumpbin.exe -ErrorAction Stop
-          $exports = & $dumpbin.Source /exports $env:LEANMOE_BRIDGE_DLL
-          $exports | Out-File build/phase3b-api/bridge-exports.txt
+          $cmd = @"
+          call "$env:LEANMOE_VSDEVCMD" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          dumpbin /exports "$env:LEANMOE_BRIDGE_DLL" > build\phase3b-api\bridge-exports.txt
+          "@
+          $cmd | Set-Content -Encoding ASCII build-phase3b-dumpbin.cmd
+          cmd.exe /D /S /C "build-phase3b-dumpbin.cmd"
+          if ($LASTEXITCODE -ne 0) {
+            throw "dumpbin failed with exit code $LASTEXITCODE"
+          }
 
+          $exports = Get-Content build/phase3b-api/bridge-exports.txt
           $required = @(
             "lm_api_version",
             "lm_sampler_create",
@@ -111,8 +159,6 @@ jobs:
           $stage = Join-Path $PWD "artifact/phase-3b-sampling-win64"
           New-Item -ItemType Directory -Force $stage | Out-Null
 
-          # Keep only runtime DLLs from the bridge build tree. This avoids
-          # committing or packaging unrelated local DLLs from the repository.
           $dlls = Get-ChildItem build/bridge -Recurse -Filter "*.dll" |
             Sort-Object FullName -Unique
 
