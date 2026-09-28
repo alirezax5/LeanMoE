@@ -41,12 +41,50 @@ jobs:
         shell: pwsh
         run: |
           $dll = Get-ChildItem build/bridge -Recurse -Filter leanmoe_bridge.dll | Select-Object -First 1
-          if (-not $dll) { throw "leanmoe_bridge.dll not found" }
-          dumpbin /exports $dll.FullName | Out-File bridge-exports.txt
-          $e = Get-Content bridge-exports.txt -Raw
-          foreach ($name in @("lm_api_version","lm_chat_apply_template","lm_sampler_create","lm_sampler_sample")) {
-            if ($e -notmatch $name) { throw "Missing export: $name" }
+          if (-not $dll) {
+            throw "leanmoe_bridge.dll not found"
           }
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe not found: $vswhere"
+          }
+
+          $vsRoot = & $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+
+          if (-not $vsRoot) {
+            throw "Visual Studio installation not found"
+          }
+
+          $dumpbin = Get-ChildItem "$vsRoot\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+
+          if (-not $dumpbin) {
+            throw "dumpbin.exe not found"
+          }
+
+          Write-Host "Using dumpbin: $($dumpbin.FullName)"
+          Write-Host "Bridge DLL: $($dll.FullName)"
+
+          & $dumpbin.FullName /exports $dll.FullName | Out-File bridge-exports.txt
+
+          $e = Get-Content bridge-exports.txt -Raw
+          foreach ($name in @(
+            "lm_api_version",
+            "lm_chat_apply_template",
+            "lm_sampler_create",
+            "lm_sampler_sample"
+          )) {
+            if ($e -notmatch [regex]::Escape($name)) {
+              throw "Missing export: $name"
+            }
+          }
+
           Write-Host "[PASS] Bridge API v5 exports present"
 
       - uses: actions/upload-artifact@v4
