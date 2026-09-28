@@ -161,13 +161,20 @@ jobs:
 
           # v4 proved ggml-cuda.dll is the first DLL that cannot load and
           # dumpbin shows a direct dependency on cublas64_13.dll.
-          $cublas = Get-ChildItem $env:CUDA_PATH -Recurse -File -Filter "cublas64_13.dll" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if (-not $cublas) {
-            throw "Required CUDA runtime DLL not found under CUDA_PATH: cublas64_13.dll"
+          $cudaRequired = @(
+            "cublas64_13.dll",
+            "cublasLt64_13.dll"
+          )
+
+          foreach ($cudaDll in $cudaRequired) {
+            $found = Get-ChildItem $env:CUDA_PATH -Recurse -File -Filter $cudaDll -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $found) {
+              throw "Required CUDA runtime DLL not found under CUDA_PATH: $cudaDll"
+            }
+            Copy-Item $found.FullName -Destination (Join-Path $runtimeSource $cudaDll) -Force
+            Write-Host "[PASS] $cudaDll <- $($found.FullName)"
           }
-          Copy-Item $cublas.FullName -Destination (Join-Path $runtimeSource "cublas64_13.dll") -Force
-          Write-Host "[PASS] cublas64_13.dll <- $($cublas.FullName)"
 
           # dumpbin also shows ggml-base/ggml-cpu depend on VCOMP140.DLL.
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -272,8 +279,11 @@ jobs:
           # Load dependency leaves first. This turns the generic bridge error
           # into the exact staged DLL that cannot be loaded.
           order = [
+              "vcomp140.dll",
               "ggml-base.dll",
               "ggml-cpu.dll",
+              "cublasLt64_13.dll",
+              "cublas64_13.dll",
               "ggml-cuda.dll",
               "ggml.dll",
               "llama.dll",
