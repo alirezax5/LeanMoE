@@ -2,6 +2,9 @@ name: phase-3c3a-chat-template-v5
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - phase-3c3a-chat-template
 
 jobs:
   windows-cuda:
