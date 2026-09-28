@@ -4,6 +4,7 @@
 #include "llama.h"
 
 #include <exception>
+#include <limits>
 #include <new>
 #include <string>
 #include <vector>
@@ -433,6 +434,309 @@ uint32_t lm_context_n_ubatch(lm_context_t context) {
 
     return llama_n_ubatch(wrapper->context);
 }
+int32_t lm_vocab_size(lm_model_t model) {
+    if (model == nullptr) {
+        return 0;
+    }
+
+    const lm_model_wrapper * wrapper =
+        static_cast<const lm_model_wrapper *>(model);
+
+    if (wrapper->model == nullptr) {
+        return 0;
+    }
+
+    const llama_vocab * vocab =
+        llama_model_get_vocab(wrapper->model);
+
+    if (vocab == nullptr) {
+        return 0;
+    }
+
+    return llama_vocab_n_tokens(vocab);
+}
+
+
+lm_result lm_tokenize(
+    lm_model_t model,
+    const char * text_utf8,
+    uint8_t add_special,
+    uint8_t parse_special,
+    lm_token * tokens,
+    int32_t token_capacity,
+    int32_t * out_count
+) {
+    clear_error();
+
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (model == nullptr ||
+        text_utf8 == nullptr ||
+        out_count == nullptr ||
+        token_capacity < 0) {
+        set_error("Invalid tokenization argument");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    lm_model_wrapper * wrapper =
+        static_cast<lm_model_wrapper *>(model);
+
+    if (wrapper->model == nullptr) {
+        set_error("Internal llama model pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    const llama_vocab * vocab =
+        llama_model_get_vocab(wrapper->model);
+
+    if (vocab == nullptr) {
+        set_error("llama_model_get_vocab() returned null");
+        return LM_ERROR_INTERNAL;
+    }
+
+    const size_t text_size = std::char_traits<char>::length(text_utf8);
+
+    if (text_size >
+        static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        set_error("Input text is too large to tokenize");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    const int32_t result = llama_tokenize(
+        vocab,
+        text_utf8,
+        static_cast<int32_t>(text_size),
+        reinterpret_cast<llama_token *>(tokens),
+        token_capacity,
+        add_special != 0,
+        parse_special != 0
+    );
+
+    if (result == INT32_MIN) {
+        set_error("llama_tokenize() overflow");
+        return LM_ERROR_INTERNAL;
+    }
+
+    if (result < 0) {
+        *out_count = -result;
+        return LM_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    *out_count = result;
+    return LM_OK;
+}
+
+
+lm_result lm_decode_tokens(
+    lm_context_t context,
+    const lm_token * tokens,
+    int32_t token_count,
+    int32_t start_pos,
+    int32_t * out_decode_status
+) {
+    clear_error();
+
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (context == nullptr ||
+        tokens == nullptr ||
+        token_count <= 0 ||
+        start_pos < 0 ||
+        out_decode_status == nullptr) {
+        set_error("Invalid decode argument");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    lm_context_wrapper * wrapper =
+        static_cast<lm_context_wrapper *>(context);
+
+    if (wrapper->context == nullptr) {
+        set_error("Internal llama context pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    llama_batch batch =
+        llama_batch_init(token_count, 0, 1);
+
+    if (batch.token == nullptr ||
+        batch.pos == nullptr ||
+        batch.n_seq_id == nullptr ||
+        batch.seq_id == nullptr ||
+        batch.logits == nullptr) {
+        llama_batch_free(batch);
+        set_error("llama_batch_init() failed");
+        return LM_ERROR_OUT_OF_MEMORY;
+    }
+
+    batch.n_tokens = token_count;
+
+    for (int32_t i = 0; i < token_count; ++i) {
+        batch.token[i] =
+            static_cast<llama_token>(tokens[i]);
+
+        batch.pos[i] =
+            static_cast<llama_pos>(start_pos + i);
+
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = 0;
+
+        batch.logits[i] =
+            (i == token_count - 1) ? 1 : 0;
+    }
+
+    const int32_t status =
+        llama_decode(wrapper->context, batch);
+
+    llama_batch_free(batch);
+
+    *out_decode_status = status;
+
+    /*
+     * Preserve llama.cpp's decode status exactly.
+     * A non-zero status is not automatically a bridge failure.
+     */
+    return LM_OK;
+}
+
+
+lm_result lm_argmax_token(
+    lm_model_t model,
+    lm_context_t context,
+    lm_token * out_token
+) {
+    clear_error();
+
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (model == nullptr ||
+        context == nullptr ||
+        out_token == nullptr) {
+        set_error("Invalid argmax argument");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    lm_model_wrapper * model_wrapper =
+        static_cast<lm_model_wrapper *>(model);
+
+    lm_context_wrapper * context_wrapper =
+        static_cast<lm_context_wrapper *>(context);
+
+    if (model_wrapper->model == nullptr ||
+        context_wrapper->context == nullptr) {
+        set_error("Internal model or context pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    const llama_vocab * vocab =
+        llama_model_get_vocab(model_wrapper->model);
+
+    if (vocab == nullptr) {
+        set_error("llama_model_get_vocab() returned null");
+        return LM_ERROR_INTERNAL;
+    }
+
+    const int32_t n_vocab =
+        llama_vocab_n_tokens(vocab);
+
+    if (n_vocab <= 0) {
+        set_error("Invalid vocabulary size");
+        return LM_ERROR_INTERNAL;
+    }
+
+    float * logits =
+        llama_get_logits_ith(context_wrapper->context, -1);
+
+    if (logits == nullptr) {
+        set_error("llama_get_logits_ith() returned null");
+        return LM_ERROR_INTERNAL;
+    }
+
+    int32_t best = 0;
+
+    for (int32_t i = 1; i < n_vocab; ++i) {
+        if (logits[i] > logits[best]) {
+            best = i;
+        }
+    }
+
+    *out_token = static_cast<lm_token>(best);
+
+    return LM_OK;
+}
+
+
+lm_result lm_token_to_piece(
+    lm_model_t model,
+    lm_token token,
+    uint8_t render_special,
+    char * buffer,
+    int32_t buffer_size,
+    int32_t * out_size
+) {
+    clear_error();
+
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (model == nullptr ||
+        buffer_size < 0 ||
+        out_size == nullptr) {
+        set_error("Invalid token-to-piece argument");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    lm_model_wrapper * wrapper =
+        static_cast<lm_model_wrapper *>(model);
+
+    if (wrapper->model == nullptr) {
+        set_error("Internal llama model pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    const llama_vocab * vocab =
+        llama_model_get_vocab(wrapper->model);
+
+    if (vocab == nullptr) {
+        set_error("llama_model_get_vocab() returned null");
+        return LM_ERROR_INTERNAL;
+    }
+
+    const int32_t result = llama_token_to_piece(
+        vocab,
+        static_cast<llama_token>(token),
+        buffer,
+        buffer_size > 0 ? buffer_size - 1 : 0,
+        0,
+        render_special != 0
+    );
+
+    if (result < 0) {
+        *out_size = -result;
+        return LM_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    *out_size = result;
+
+    if (buffer == nullptr || buffer_size <= result) {
+        return LM_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    buffer[result] = '\0';
+
+    return LM_OK;
+}
+
 uint64_t lm_model_size(lm_model_t model) {
     if (model == nullptr) {
         return 0;

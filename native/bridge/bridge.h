@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 2u
+#define LM_BRIDGE_API_VERSION 3u
 
 typedef void * lm_model_t;
 
@@ -28,7 +28,8 @@ typedef enum lm_result {
     LM_ERROR_LOAD_MODEL       = -3,
     LM_ERROR_OUT_OF_MEMORY    = -7,
     LM_ERROR_BACKEND          = -8,
-    LM_ERROR_INTERNAL         = -100
+    LM_ERROR_INTERNAL         = -100,
+    LM_ERROR_BUFFER_TOO_SMALL = -101
 } lm_result;
 
 typedef struct lm_model_config {
@@ -118,6 +119,77 @@ LM_API uint32_t lm_context_n_batch(
 
 LM_API uint32_t lm_context_n_ubatch(
     lm_context_t context
+);
+
+/* Inference */
+
+typedef int32_t lm_token;
+
+LM_API int32_t lm_vocab_size(
+    lm_model_t model
+);
+
+/*
+ * Tokenize UTF-8 text.
+ *
+ * On success:
+ *   returns LM_OK and writes the token count to out_count.
+ *
+ * If tokens is NULL or token_capacity is too small:
+ *   returns LM_ERROR_BUFFER_TOO_SMALL and writes the required
+ *   token count to out_count.
+ */
+LM_API lm_result lm_tokenize(
+    lm_model_t model,
+    const char * text_utf8,
+    uint8_t add_special,
+    uint8_t parse_special,
+    lm_token * tokens,
+    int32_t token_capacity,
+    int32_t * out_count
+);
+
+/*
+ * Decode one single-sequence token batch.
+ *
+ * start_pos is the position assigned to tokens[0].
+ * Logits are requested only for the final token.
+ *
+ * llama_decode() warning/error status is returned separately
+ * through out_decode_status.
+ */
+LM_API lm_result lm_decode_tokens(
+    lm_context_t context,
+    const lm_token * tokens,
+    int32_t token_count,
+    int32_t start_pos,
+    int32_t * out_decode_status
+);
+
+/*
+ * Return the token with the largest logit from the most recent
+ * decode output. This is a deterministic diagnostic primitive,
+ * not LeanMoE's final sampling implementation.
+ */
+LM_API lm_result lm_argmax_token(
+    lm_model_t model,
+    lm_context_t context,
+    lm_token * out_token
+);
+
+/*
+ * Convert one token to its UTF-8 byte representation.
+ *
+ * out_size receives the number of bytes excluding the optional
+ * NUL terminator added by the bridge.
+ */
+LM_API lm_result lm_token_to_piece(
+    lm_model_t model,
+    lm_token token,
+    uint8_t render_special,
+    char * buffer,
+    int32_t buffer_size,
+    int32_t * out_size
 );
 
 /* Metadata */
