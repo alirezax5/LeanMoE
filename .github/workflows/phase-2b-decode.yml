@@ -84,6 +84,7 @@ jobs:
           cl /nologo /std:c++17 /EHsc /c ^
             tests\native\phase2b_api_compile.cpp ^
             /I external\llama.cpp\include ^
+            /I external\llama.cpp\ggml\include ^
             /Fo:build\phase2b_api_compile.obj
 
       - name: Verify Bridge API v3 exports
