@@ -103,7 +103,6 @@ class LeanMoEOpenAIServer:
         if not isinstance(parallel_tool_calls,bool): raise ValueError("parallel_tool_calls must be a boolean")
         stream=body.get("stream",False)
         if not isinstance(stream,bool): raise ValueError("stream must be a boolean")
-        if stream and tools is not None: raise ValueError("streaming tool calls are not supported in Phase 3D.4C1")
         if "n" in body and (not isinstance(body["n"],int) or isinstance(body["n"],bool) or body["n"]!=1): raise ValueError("n must be 1")
         if body.get("logprobs") not in (None,False) or "top_logprobs" in body: raise ValueError("logprobs are not supported")
         if "response_format" in body and body["response_format"]!={"type":"text"}: raise ValueError("only response_format.type='text' is supported")
@@ -202,99 +201,126 @@ class LeanMoEOpenAIServer:
         messages,max_tokens,sampling=self._request_config(body)
         enable_thinking=bool(body.get("enable_thinking",True))
         stops=_stop_list(body)
+        tools=body.get("tools")
+        tool_choice=body.get("tool_choice","auto")
+        parallel_tool_calls=body.get("parallel_tool_calls",True)
+        structured=tools is not None or any(m.get("role") in {"developer","tool"} or m.get("tool_calls") for m in messages)
         cid="chatcmpl-"+uuid.uuid4().hex
         created=int(time.time())
 
         def send(obj: Any)->None:
             payload="data: "+json.dumps(obj,ensure_ascii=False,separators=(",",":"))+"\n\n"
-            handler.wfile.write(payload.encode("utf-8"))
-            handler.wfile.flush()
+            handler.wfile.write(payload.encode("utf-8")); handler.wfile.flush()
+
+        def chunk(delta: dict[str,Any], finish_reason=None)->dict[str,Any]:
+            return {"id":cid,"object":"chat.completion.chunk","created":created,"model":self.model_id,
+                    "choices":[{"index":0,"delta":delta,"finish_reason":finish_reason}]}
 
         acquired_here=False
         if not lock_held:
-            if not self._lock.acquire(blocking=False):
-                raise RuntimeError("inference_busy")
+            if not self._lock.acquire(blocking=False): raise RuntimeError("inference_busy")
             acquired_here=True
         try:
             with LeanMoEBackend(self.runtime_dir,self.model_path,self.backend_config) as backend:
-                prompt=backend._bridge.chat_apply_template(
-                    backend._model,[(m["role"],m["content"]) for m in messages],
-                    add_generation_prompt=True,enable_thinking=enable_thinking)
+                if structured:
+                    meta=backend._bridge.chat_apply_structured(
+                        backend._model,messages,tools,tool_choice=tool_choice,add_generation_prompt=True,
+                        enable_thinking=enable_thinking,parallel_tool_calls=parallel_tool_calls)
+                    prompt=meta.get("prompt")
+                    if not isinstance(prompt,str) or not prompt: raise RuntimeError("structured renderer returned no prompt")
+                else:
+                    prompt=backend._bridge.chat_apply_template(
+                        backend._model,[(m["role"],m["content"]) for m in messages],
+                        add_generation_prompt=True,enable_thinking=enable_thinking)
                 prompt_ids=backend.tokenize_chat_prompt(prompt)
-                if not prompt_ids:
-                    raise ValueError("Prompt tokenized to zero tokens")
+                if not prompt_ids: raise ValueError("Prompt tokenized to zero tokens")
                 if len(prompt_ids)+max_tokens>backend.config.n_ctx:
                     raise ValueError(f"Prompt + generation exceeds context: {len(prompt_ids)} + {max_tokens} > {backend.config.n_ctx}")
                 backend.prefill_tokens(prompt_ids)
-
-                send({"id":cid,"object":"chat.completion.chunk","created":created,"model":self.model_id,
-                      "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":None}]})
+                send(chunk({"role":"assistant"}))
 
                 raw=""; parsed_raw=""; sent_reasoning=""; sent_content=""
                 completion_tokens=0; stop_hit=False
+                tool_ids=[]; sent_tool_names=[]; sent_tool_args=[]; revision_fault=False
+
+                def emit_parsed(pp: dict[str,Any])->None:
+                    nonlocal sent_reasoning,sent_content,revision_fault
+                    cr=pp.get("reasoning_content","") or ""; cc=pp.get("content","") or ""
+                    if cr.startswith(sent_reasoning):
+                        d=cr[len(sent_reasoning):]
+                        if d: send(chunk({"reasoning_content":d})); sent_reasoning=cr
+                    elif cr!=sent_reasoning: revision_fault=True
+                    if cc.startswith(sent_content):
+                        d=cc[len(sent_content):]
+                        if d: send(chunk({"content":d})); sent_content=cc
+                    elif cc!=sent_content: revision_fault=True
+                    for i,call in enumerate(pp.get("tool_calls") or []):
+                        if not isinstance(call,dict): continue
+                        fn=call.get("function") or {}; name=fn.get("name","") or ""; args=fn.get("arguments","") or ""
+                        while len(tool_ids)<=i:
+                            nid=call.get("id")
+                            tool_ids.append(nid if isinstance(nid,str) and nid else "call_"+uuid.uuid4().hex)
+                            sent_tool_names.append(""); sent_tool_args.append("")
+                        dc={"index":i}; changed=False
+                        if not sent_tool_names[i]:
+                            dc.update({"id":tool_ids[i],"type":"function",
+                                       "function":{"name":name,"arguments":args}})
+                            sent_tool_names[i]=name; sent_tool_args[i]=args; changed=True
+                        elif name!=sent_tool_names[i]:
+                            revision_fault=True; continue
+                        elif args.startswith(sent_tool_args[i]):
+                            suffix=args[len(sent_tool_args[i]):]
+                            if suffix:
+                                dc["function"]={"arguments":suffix}; sent_tool_args[i]=args; changed=True
+                        elif args!=sent_tool_args[i]:
+                            revision_fault=True; continue
+                        if changed: send(chunk({"tool_calls":[dc]}))
+
                 gen=backend.stream_sampled(max_tokens=max_tokens,sampling=sampling)
                 try:
                     for _,piece in gen:
-                        completion_tokens+=1
-                        raw+=piece
-                        cut,stop_hit=_cut_at_stop(raw,stops)
-                        safe=cut if stop_hit else _safe_prefix(cut,stops)
+                        completion_tokens+=1; raw+=piece
+                        cut,stop_hit=_cut_at_stop(raw,stops); safe=cut if stop_hit else _safe_prefix(cut,stops)
                         if safe!=parsed_raw or stop_hit:
                             parsed_raw=safe
-                            pp=backend._bridge.chat_parse_output(
-                                backend._model,safe,enable_thinking=enable_thinking,is_partial=not stop_hit)
-                            cr=pp.get("reasoning_content","")
-                            cc=pp.get("content","")
-                            if cr.startswith(sent_reasoning):
-                                delta=cr[len(sent_reasoning):]
-                                if delta:
-                                    send({"id":cid,"object":"chat.completion.chunk","created":created,"model":self.model_id,
-                                          "choices":[{"index":0,"delta":{"reasoning_content":delta},"finish_reason":None}]})
-                                    sent_reasoning=cr
-                            if cc.startswith(sent_content):
-                                delta=cc[len(sent_content):]
-                                if delta:
-                                    send({"id":cid,"object":"chat.completion.chunk","created":created,"model":self.model_id,
-                                          "choices":[{"index":0,"delta":{"content":delta},"finish_reason":None}]})
-                                    sent_content=cc
-                        if stop_hit:
-                            break
+                            if structured:
+                                pp=backend._bridge.chat_parse_output_structured(
+                                    backend._model,messages,safe,tools,tool_choice=tool_choice,
+                                    enable_thinking=enable_thinking,parallel_tool_calls=parallel_tool_calls,
+                                    is_partial=not stop_hit)
+                            else:
+                                pp=backend._bridge.chat_parse_output(
+                                    backend._model,safe,enable_thinking=enable_thinking,is_partial=not stop_hit)
+                            emit_parsed(pp)
+                        if stop_hit: break
                 finally:
                     gen.close()
 
                 final_raw,_=_cut_at_stop(raw,stops)
-                parsed=backend._bridge.chat_parse_output(
-                    backend._model,final_raw,enable_thinking=enable_thinking,is_partial=False)
-                fr=parsed.get("reasoning_content","")
-                fc=parsed.get("content","")
-                if fr.startswith(sent_reasoning):
-                    delta=fr[len(sent_reasoning):]
-                    if delta:
-                        send({"id":cid,"object":"chat.completion.chunk","created":created,"model":self.model_id,
-                              "choices":[{"index":0,"delta":{"reasoning_content":delta},"finish_reason":None}]})
-                if fc.startswith(sent_content):
-                    delta=fc[len(sent_content):]
-                    if delta:
-                        send({"id":cid,"object":"chat.completion.chunk","created":created,"model":self.model_id,
-                              "choices":[{"index":0,"delta":{"content":delta},"finish_reason":None}]})
-
-                finish_reason="stop" if stop_hit else (backend.last_finish_reason or "length")
-                send({"id":cid,"object":"chat.completion.chunk","created":created,"model":self.model_id,
-                      "choices":[{"index":0,"delta":{},"finish_reason":finish_reason}]})
+                if structured:
+                    parsed=backend._bridge.chat_parse_output_structured(
+                        backend._model,messages,final_raw,tools,tool_choice=tool_choice,
+                        enable_thinking=enable_thinking,parallel_tool_calls=parallel_tool_calls,is_partial=False)
+                else:
+                    parsed=backend._bridge.chat_parse_output(
+                        backend._model,final_raw,enable_thinking=enable_thinking,is_partial=False)
+                emit_parsed(parsed)
+                if revision_fault: raise RuntimeError("structured partial parser revised already-streamed output")
+                final_calls=parsed.get("tool_calls") or []
+                finish_reason="tool_calls" if final_calls else ("stop" if stop_hit else (backend.last_finish_reason or "length"))
+                send(chunk({},finish_reason))
                 if (body.get("stream_options") or {}).get("include_usage",False):
                     send({"id":cid,"object":"chat.completion.chunk","created":created,"model":self.model_id,"choices":[],
                           "usage":{"prompt_tokens":len(prompt_ids),"completion_tokens":completion_tokens,
                                    "total_tokens":len(prompt_ids)+completion_tokens}})
-                handler.wfile.write(b"data: [DONE]\n\n")
-                handler.wfile.flush()
+                handler.wfile.write(b"data: [DONE]\n\n"); handler.wfile.flush()
         finally:
-            if acquired_here:
-                self._lock.release()
+            if acquired_here: self._lock.release()
 
     def make_handler(self):
         owner=self
         class Handler(BaseHTTPRequestHandler):
-            server_version="LeanMoE/3D.4C1"; protocol_version="HTTP/1.1"
+            server_version="LeanMoE/3D.4C2B"; protocol_version="HTTP/1.1"
             def log_message(self,fmt: str,*args: Any)->None: print("[HTTP] "+(fmt % args))
             def _send(self,status: int,obj: Any)->None:
                 payload=_json_bytes(obj); self.send_response(status)
@@ -309,7 +335,7 @@ class LeanMoEOpenAIServer:
                 self.end_headers(); self.wfile.write(payload)
             def do_GET(self)->None:
                 path=self.path.split("?",1)[0]
-                if path=="/health": self._send(200,{"status":"ok","phase":"3D.4C1","model":owner.model_id})
+                if path=="/health": self._send(200,{"status":"ok","phase":"3D.4C2B","model":owner.model_id})
                 elif path=="/v1/models": self._send(200,{"object":"list","data":[{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"}]})
                 elif path==f"/v1/models/{owner.model_id}": self._send(200,{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"})
                 elif path.startswith("/v1/models/"): self._error(404,"Model not found",param="model",code="model_not_found")
@@ -367,7 +393,7 @@ class LeanMoEOpenAIServer:
 
     def serve_forever(self) -> None:
         self._httpd = ThreadingHTTPServer((self.host, self.port), self.make_handler())
-        print(f"LeanMoE Phase 3D.4C1 listening on http://{self.host}:{self.port}")
+        print(f"LeanMoE Phase 3D.4C2B listening on http://{self.host}:{self.port}")
         print(f"Model: {self.model_id}")
         self._httpd.serve_forever()
 
