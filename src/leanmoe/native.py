@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 
-BRIDGE_API_VERSION = 7
+BRIDGE_API_VERSION = 8
 
 LM_OK = 0
 LM_ERROR_INVALID_ARGUMENT = -1
@@ -216,6 +216,16 @@ class NativeBridge:
             ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
         ]
         dll.lm_chat_template_metadata.restype = ctypes.c_int
+        dll.lm_chat_parse_output.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_uint8,
+            ctypes.c_uint8,
+            ctypes.POINTER(ctypes.c_char),
+            ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32),
+        ]
+        dll.lm_chat_parse_output.restype = ctypes.c_int
 
         # Metadata
         dll.lm_model_size.argtypes = [ctypes.c_void_p]
@@ -358,6 +368,37 @@ class NativeBridge:
         size=required.value+1; buffer=ctypes.create_string_buffer(size); actual=ctypes.c_int32()
         rc=self.dll.lm_chat_template_metadata(model,int(enable_thinking),buffer,size,ctypes.byref(actual))
         self.check(rc,"lm_chat_template_metadata()")
+        return json.loads(bytes(buffer.raw[:actual.value]).decode("utf-8"))
+
+    def chat_parse_output(
+        self,
+        model: ctypes.c_void_p,
+        generated: str,
+        *,
+        enable_thinking: bool = True,
+        is_partial: bool = False,
+    ) -> dict:
+        import json
+        encoded = str(generated).encode("utf-8")
+        required = ctypes.c_int32()
+        rc = self.dll.lm_chat_parse_output(
+            model, encoded, int(enable_thinking), int(is_partial),
+            None, 0, ctypes.byref(required),
+        )
+        if rc != LM_ERROR_BUFFER_TOO_SMALL:
+            self.check(rc, "lm_chat_parse_output(size query)")
+        if required.value < 0:
+            raise LeanMoENativeError("invalid parsed chat output size")
+        size = required.value + 1
+        buffer = ctypes.create_string_buffer(size)
+        actual = ctypes.c_int32()
+        rc = self.dll.lm_chat_parse_output(
+            model, encoded, int(enable_thinking), int(is_partial),
+            buffer, size, ctypes.byref(actual),
+        )
+        self.check(rc, "lm_chat_parse_output()")
+        if actual.value < 0 or actual.value >= size:
+            raise LeanMoENativeError("invalid parsed chat output size")
         return json.loads(bytes(buffer.raw[:actual.value]).decode("utf-8"))
 
     # Context -------------------------------------------------------------

@@ -1194,6 +1194,96 @@ lm_result lm_chat_template_metadata(
       catch(...){set_error("Unknown exception while reading chat metadata");return LM_ERROR_BACKEND;}
 }
 
+lm_result lm_chat_parse_output(
+    lm_model_t model,
+    const char * generated_utf8,
+    uint8_t enable_thinking,
+    uint8_t is_partial,
+    char * buffer,
+    int32_t buffer_size,
+    int32_t * out_size
+) {
+    clear_error();
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+    if (model == nullptr || generated_utf8 == nullptr ||
+        out_size == nullptr || buffer_size < 0) {
+        set_error("Invalid chat parse argument");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    const lm_model_wrapper * wrapper =
+        static_cast<const lm_model_wrapper *>(model);
+    if (wrapper->model == nullptr) {
+        set_error("Internal llama model pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    try {
+        auto templates = common_chat_templates_init(wrapper->model, "");
+        if (!templates) {
+            set_error("common_chat_templates_init() returned null");
+            return LM_ERROR_INTERNAL;
+        }
+
+        common_chat_msg probe;
+        probe.role = "user";
+        probe.content = "test";
+
+        common_chat_templates_inputs inputs;
+        inputs.messages = { probe };
+        inputs.add_generation_prompt = true;
+        inputs.use_jinja = true;
+        inputs.enable_thinking = enable_thinking != 0;
+
+        const common_chat_params chat_params =
+            common_chat_templates_apply(templates.get(), inputs);
+
+        common_chat_parser_params parser_params(chat_params);
+        parser_params.parser.load(chat_params.parser);
+
+        const common_chat_msg parsed = common_chat_parse(
+            std::string(generated_utf8),
+            is_partial != 0,
+            parser_params
+        );
+
+        const std::string json =
+            parsed.to_json_oaicompat(false).dump();
+
+        if (json.size() >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            set_error("Parsed chat output is too large");
+            return LM_ERROR_INTERNAL;
+        }
+
+        *out_size = static_cast<int32_t>(json.size());
+        if (buffer == nullptr || buffer_size <= *out_size) {
+            return LM_ERROR_BUFFER_TOO_SMALL;
+        }
+        if (*out_size > 0) {
+            std::memcpy(buffer, json.data(), json.size());
+        }
+        buffer[*out_size] = '\0';
+        return LM_OK;
+    }
+    catch (const std::bad_alloc &) {
+        set_error("Out of memory while parsing chat output");
+        return LM_ERROR_OUT_OF_MEMORY;
+    }
+    catch (const std::exception & exc) {
+        set_error(exc.what());
+        return LM_ERROR_BACKEND;
+    }
+    catch (...) {
+        set_error("Unknown exception while parsing chat output");
+        return LM_ERROR_BACKEND;
+    }
+}
+
+
 uint64_t lm_model_size(lm_model_t model) {
     if (model == nullptr) {
         return 0;

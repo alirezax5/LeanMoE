@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 7u
+#define LM_BRIDGE_API_VERSION 8u
 
 typedef void * lm_model_t;
 
@@ -292,6 +292,17 @@ LM_API lm_result lm_chat_apply_template(
 LM_API lm_result lm_chat_template_metadata(
     lm_model_t model,
     uint8_t enable_thinking,
+    char * buffer,
+    int32_t buffer_size,
+    int32_t * out_size
+);
+
+/* Bridge API v8: parse raw assistant output using the model-derived parser. */
+LM_API lm_result lm_chat_parse_output(
+    lm_model_t model,
+    const char * generated_utf8,
+    uint8_t enable_thinking,
+    uint8_t is_partial,
     char * buffer,
     int32_t buffer_size,
     int32_t * out_size
