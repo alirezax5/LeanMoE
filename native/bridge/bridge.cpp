@@ -1237,6 +1237,7 @@ lm_result lm_chat_parse_output(
         inputs.add_generation_prompt = true;
         inputs.use_jinja = true;
         inputs.enable_thinking = enable_thinking != 0;
+        inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
 
         const common_chat_params chat_params =
             common_chat_templates_apply(templates.get(), inputs);
