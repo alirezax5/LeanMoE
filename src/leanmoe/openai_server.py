@@ -148,29 +148,56 @@ class LeanMoEOpenAIServer:
                       "model":self.model_id,
                       "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":None}]})
 
-                # Correctness-first Phase 3C.3B: buffer model pieces so <think> tags
-                # can never leak into content. Incremental reasoning streaming can
-                # be optimized later without changing the API contract.
+                # Phase 3C.4: llama.cpp common_chat parses partial output.
                 pieces=[]
+                sent_reasoning=""
+                sent_content=""
                 gen=backend.stream_sampled(max_tokens=max_tokens,sampling=sampling)
                 try:
                     for _, piece in gen:
                         pieces.append(piece)
+                        parsed_partial=backend._bridge.chat_parse_output(
+                            backend._model, "".join(pieces),
+                            enable_thinking=enable_thinking, is_partial=True)
+                        current_reasoning=parsed_partial.get("reasoning_content", "")
+                        current_content=parsed_partial.get("content", "")
+                        if current_reasoning.startswith(sent_reasoning):
+                            delta=current_reasoning[len(sent_reasoning):]
+                            if delta:
+                                send({"id":cid,"object":"chat.completion.chunk","created":created,
+                                      "model":self.model_id,
+                                      "choices":[{"index":0,"delta":{"reasoning_content":delta},"finish_reason":None}]})
+                                sent_reasoning=current_reasoning
+                        if current_content.startswith(sent_content):
+                            delta=current_content[len(sent_content):]
+                            if delta:
+                                send({"id":cid,"object":"chat.completion.chunk","created":created,
+                                      "model":self.model_id,
+                                      "choices":[{"index":0,"delta":{"content":delta},"finish_reason":None}]})
+                                sent_content=current_content
                 finally:
                     gen.close()
 
-                parsed=backend._bridge.chat_parse_output(backend._model, "".join(pieces), enable_thinking=enable_thinking, is_partial=False)
-                split=type("_Parsed", (), {"reasoning": parsed.get("reasoning_content", "").rstrip(), "content": parsed.get("content", "")})()
-                if split.reasoning:
-                    send({"id":cid,"object":"chat.completion.chunk","created":created,
-                          "model":self.model_id,
-                          "choices":[{"index":0,"delta":{"reasoning_content":split.reasoning},
-                                      "finish_reason":None}]})
-                if split.content:
-                    send({"id":cid,"object":"chat.completion.chunk","created":created,
-                          "model":self.model_id,
-                          "choices":[{"index":0,"delta":{"content":split.content},
-                                      "finish_reason":None}]})
+                # Final parse flushes any suffix withheld while output was partial.
+                parsed=backend._bridge.chat_parse_output(
+                    backend._model, "".join(pieces),
+                    enable_thinking=enable_thinking, is_partial=False)
+                final_reasoning=parsed.get("reasoning_content", "")
+                final_content=parsed.get("content", "")
+                if final_reasoning.startswith(sent_reasoning):
+                    delta=final_reasoning[len(sent_reasoning):]
+                    if delta:
+                        send({"id":cid,"object":"chat.completion.chunk","created":created,
+                              "model":self.model_id,
+                              "choices":[{"index":0,"delta":{"reasoning_content":delta},"finish_reason":None}]})
+                        sent_reasoning=final_reasoning
+                if final_content.startswith(sent_content):
+                    delta=final_content[len(sent_content):]
+                    if delta:
+                        send({"id":cid,"object":"chat.completion.chunk","created":created,
+                              "model":self.model_id,
+                              "choices":[{"index":0,"delta":{"content":delta},"finish_reason":None}]})
+                        sent_content=final_content
 
                 finish_reason=backend.last_finish_reason or "length"
                 send({"id":cid,"object":"chat.completion.chunk","created":created,
