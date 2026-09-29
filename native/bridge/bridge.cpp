@@ -468,6 +468,40 @@ int32_t lm_vocab_size(lm_model_t model) {
 }
 
 
+lm_result lm_token_is_eog(
+    lm_model_t model,
+    lm_token token,
+    uint8_t * out_is_eog
+) {
+    clear_error();
+
+    if (!g_initialized) {
+        set_error("LeanMoE bridge is not initialized");
+        return LM_ERROR_NOT_INITIALIZED;
+    }
+    if (model == nullptr || out_is_eog == nullptr) {
+        set_error("Invalid EOG query argument");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    const lm_model_wrapper * wrapper =
+        static_cast<const lm_model_wrapper *>(model);
+    if (wrapper->model == nullptr) {
+        set_error("Internal llama model pointer is null");
+        return LM_ERROR_INVALID_ARGUMENT;
+    }
+
+    const llama_vocab * vocab = llama_model_get_vocab(wrapper->model);
+    if (vocab == nullptr) {
+        set_error("llama_model_get_vocab() returned null");
+        return LM_ERROR_INTERNAL;
+    }
+
+    *out_is_eog = llama_vocab_is_eog(vocab, static_cast<llama_token>(token)) ? 1 : 0;
+    return LM_OK;
+}
+
+
 lm_result lm_tokenize(
     lm_model_t model,
     const char * text_utf8,

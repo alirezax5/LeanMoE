@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 5u
+#define LM_BRIDGE_API_VERSION 6u
 
 typedef void * lm_model_t;
 
@@ -127,6 +127,13 @@ typedef int32_t lm_token;
 
 LM_API int32_t lm_vocab_size(
     lm_model_t model
+);
+
+/* Bridge API v6: model-vocabulary end-of-generation classification. */
+LM_API lm_result lm_token_is_eog(
+    lm_model_t model,
+    lm_token token,
+    uint8_t * out_is_eog
 );
 
 /*

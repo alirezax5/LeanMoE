@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 
-BRIDGE_API_VERSION = 5
+BRIDGE_API_VERSION = 6
 
 LM_OK = 0
 LM_ERROR_INVALID_ARGUMENT = -1
@@ -155,6 +155,13 @@ class NativeBridge:
         # Inference
         dll.lm_vocab_size.argtypes = [ctypes.c_void_p]
         dll.lm_vocab_size.restype = ctypes.c_int32
+
+        dll.lm_token_is_eog.argtypes = [
+            ctypes.c_void_p,
+            LMToken,
+            ctypes.POINTER(ctypes.c_uint8),
+        ]
+        dll.lm_token_is_eog.restype = ctypes.c_int
 
         dll.lm_tokenize.argtypes = [
             ctypes.c_void_p,
@@ -480,6 +487,12 @@ class NativeBridge:
         )
         self.check(rc, "lm_argmax_token()")
         return int(token.value)
+
+    def token_is_eog(self, model: ctypes.c_void_p, token: int) -> bool:
+        out = ctypes.c_uint8()
+        rc = self.dll.lm_token_is_eog(model, int(token), ctypes.byref(out))
+        self.check(rc, "lm_token_is_eog()")
+        return bool(out.value)
 
     def token_to_piece(
         self,
