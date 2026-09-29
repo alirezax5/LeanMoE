@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 8u
+#define LM_BRIDGE_API_VERSION 9u
 
 typedef void * lm_model_t;
 
@@ -219,6 +219,32 @@ typedef struct lm_sampler_config {
 
     uint8_t reserved[7];
 } lm_sampler_config;
+
+/* Sampling v2 — Bridge API v9. Legacy v4 sampler ABI remains available. */
+typedef struct lm_sampler_config_v2 {
+    float temperature;
+    int32_t top_k;
+    float top_p;
+    float min_p;
+    uint32_t seed;
+    uint8_t greedy;
+    uint8_t reserved0[3];
+    int32_t penalty_last_n;
+    float penalty_repeat;
+    float penalty_freq;
+    float penalty_present;
+} lm_sampler_config_v2;
+
+/*
+ * Model-aware creation is required because pinned llama.cpp penalties need
+ * the vocabulary size. Non-greedy order:
+ * penalties -> top-k -> top-p -> min-p -> temperature -> dist(seed)
+ */
+LM_API lm_result lm_sampler_create_v2(
+    lm_model_t model,
+    const lm_sampler_config_v2 * config,
+    lm_sampler_t * out_sampler
+);
 
 /*
  * Create a native llama.cpp sampler chain.

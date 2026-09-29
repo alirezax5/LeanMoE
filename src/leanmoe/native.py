@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 
-BRIDGE_API_VERSION = 8
+BRIDGE_API_VERSION = 9
 
 LM_OK = 0
 LM_ERROR_INVALID_ARGUMENT = -1

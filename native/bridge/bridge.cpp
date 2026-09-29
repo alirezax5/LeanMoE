@@ -5,6 +5,7 @@
 #include "chat.h"
 
 #include <exception>
+#include <cmath>
 #include <cstring>
 #include <utility>
 #include <limits>
@@ -780,6 +781,93 @@ lm_result lm_token_to_piece(
     buffer[result] = '\0';
 
     return LM_OK;
+}
+
+
+lm_result lm_sampler_create_v2(
+    lm_model_t model,
+    const lm_sampler_config_v2 * config,
+    lm_sampler_t * out_sampler
+) {
+    clear_error();
+    if (!g_initialized) { set_error("LeanMoE bridge is not initialized"); return LM_ERROR_NOT_INITIALIZED; }
+    if (model == nullptr || config == nullptr || out_sampler == nullptr) {
+        set_error("Invalid sampler v2 create argument"); return LM_ERROR_INVALID_ARGUMENT;
+    }
+    *out_sampler = nullptr;
+    auto * model_wrapper = static_cast<lm_model_wrapper *>(model);
+    if (model_wrapper->model == nullptr) { set_error("Sampler v2 model is null"); return LM_ERROR_INVALID_ARGUMENT; }
+
+    if (config->greedy == 0) {
+        if (!(config->temperature > 0.0f) || !std::isfinite(config->temperature)) {
+            set_error("temperature must be finite and > 0 for non-greedy sampling"); return LM_ERROR_INVALID_ARGUMENT;
+        }
+        if (!(config->top_p > 0.0f && config->top_p <= 1.0f) || !std::isfinite(config->top_p)) {
+            set_error("top_p must be finite and in (0, 1]"); return LM_ERROR_INVALID_ARGUMENT;
+        }
+        if (!(config->min_p >= 0.0f && config->min_p <= 1.0f) || !std::isfinite(config->min_p)) {
+            set_error("min_p must be finite and in [0, 1]"); return LM_ERROR_INVALID_ARGUMENT;
+        }
+        if (config->penalty_last_n < 0) { set_error("penalty_last_n must be >= 0"); return LM_ERROR_INVALID_ARGUMENT; }
+        if (!(config->penalty_repeat > 0.0f) || !std::isfinite(config->penalty_repeat)) {
+            set_error("penalty_repeat must be finite and > 0"); return LM_ERROR_INVALID_ARGUMENT;
+        }
+        if (!std::isfinite(config->penalty_freq) || !std::isfinite(config->penalty_present)) {
+            set_error("frequency/presence penalties must be finite"); return LM_ERROR_INVALID_ARGUMENT;
+        }
+    }
+
+    llama_sampler * chain = nullptr;
+    try {
+        chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+        if (chain == nullptr) { set_error("llama_sampler_chain_init() returned null"); return LM_ERROR_OUT_OF_MEMORY; }
+
+        if (config->greedy != 0) {
+            llama_sampler * s = llama_sampler_init_greedy();
+            if (s == nullptr) { llama_sampler_free(chain); set_error("llama_sampler_init_greedy() returned null"); return LM_ERROR_OUT_OF_MEMORY; }
+            llama_sampler_chain_add(chain, s);
+        } else {
+            if (config->penalty_last_n > 0 &&
+                (config->penalty_repeat != 1.0f || config->penalty_freq != 0.0f || config->penalty_present != 0.0f)) {
+                const llama_vocab * vocab = llama_model_get_vocab(model_wrapper->model);
+                if (vocab == nullptr) { llama_sampler_free(chain); set_error("llama_model_get_vocab() returned null"); return LM_ERROR_INTERNAL; }
+                llama_sampler * s = llama_sampler_init_penalties(
+                    llama_vocab_n_tokens(vocab), config->penalty_last_n,
+                    config->penalty_repeat, config->penalty_freq, config->penalty_present);
+                if (s == nullptr) { llama_sampler_free(chain); set_error("llama_sampler_init_penalties() returned null"); return LM_ERROR_OUT_OF_MEMORY; }
+                llama_sampler_chain_add(chain, s);
+            }
+            if (config->top_k > 0) {
+                llama_sampler * s=llama_sampler_init_top_k(config->top_k);
+                if (s==nullptr) { llama_sampler_free(chain); set_error("llama_sampler_init_top_k() returned null"); return LM_ERROR_OUT_OF_MEMORY; }
+                llama_sampler_chain_add(chain,s);
+            }
+            if (config->top_p < 1.0f) {
+                llama_sampler * s=llama_sampler_init_top_p(config->top_p,1);
+                if (s==nullptr) { llama_sampler_free(chain); set_error("llama_sampler_init_top_p() returned null"); return LM_ERROR_OUT_OF_MEMORY; }
+                llama_sampler_chain_add(chain,s);
+            }
+            if (config->min_p > 0.0f) {
+                llama_sampler * s=llama_sampler_init_min_p(config->min_p,1);
+                if (s==nullptr) { llama_sampler_free(chain); set_error("llama_sampler_init_min_p() returned null"); return LM_ERROR_OUT_OF_MEMORY; }
+                llama_sampler_chain_add(chain,s);
+            }
+            llama_sampler * temp=llama_sampler_init_temp(config->temperature);
+            if (temp==nullptr) { llama_sampler_free(chain); set_error("llama_sampler_init_temp() returned null"); return LM_ERROR_OUT_OF_MEMORY; }
+            llama_sampler_chain_add(chain,temp);
+            llama_sampler * dist=llama_sampler_init_dist(config->seed);
+            if (dist==nullptr) { llama_sampler_free(chain); set_error("llama_sampler_init_dist() returned null"); return LM_ERROR_OUT_OF_MEMORY; }
+            llama_sampler_chain_add(chain,dist);
+        }
+
+        auto * wrapper=new (std::nothrow) lm_sampler_wrapper();
+        if (wrapper==nullptr) { llama_sampler_free(chain); set_error("Failed to allocate sampler wrapper"); return LM_ERROR_OUT_OF_MEMORY; }
+        wrapper->sampler=chain; *out_sampler=wrapper; return LM_OK;
+    } catch (const std::exception & exc) {
+        if (chain!=nullptr) llama_sampler_free(chain); set_error(exc.what()); return LM_ERROR_INTERNAL;
+    } catch (...) {
+        if (chain!=nullptr) llama_sampler_free(chain); set_error("Unknown exception during sampler v2 creation"); return LM_ERROR_INTERNAL;
+    }
 }
 
 
