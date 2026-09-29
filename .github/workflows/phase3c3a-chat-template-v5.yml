@@ -1,10 +1,8 @@
 name: phase-3c3a-chat-template-v5
-
 on:
   workflow_dispatch:
   push:
-    branches:
-      - phase-3c3a-chat-template
+    branches: [phase-3c3a-chat-template]
 
 jobs:
   windows-cuda:
@@ -41,55 +39,71 @@ jobs:
         shell: pwsh
         run: |
           $dll = Get-ChildItem build/bridge -Recurse -Filter leanmoe_bridge.dll | Select-Object -First 1
-          if (-not $dll) {
-            throw "leanmoe_bridge.dll not found"
-          }
+          if (-not $dll) { throw "leanmoe_bridge.dll not found" }
 
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere)) {
-            throw "vswhere.exe not found: $vswhere"
-          }
-
-          $vsRoot = & $vswhere `
-            -latest `
-            -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -property installationPath
-
-          if (-not $vsRoot) {
-            throw "Visual Studio installation not found"
-          }
-
-          $dumpbin = Get-ChildItem "$vsRoot\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-
-          if (-not $dumpbin) {
-            throw "dumpbin.exe not found"
-          }
-
-          Write-Host "Using dumpbin: $($dumpbin.FullName)"
-          Write-Host "Bridge DLL: $($dll.FullName)"
+          $vsRoot = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vsRoot\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
 
           & $dumpbin.FullName /exports $dll.FullName | Out-File bridge-exports.txt
-
           $e = Get-Content bridge-exports.txt -Raw
-          foreach ($name in @(
-            "lm_api_version",
-            "lm_chat_apply_template",
-            "lm_sampler_create",
-            "lm_sampler_sample"
-          )) {
-            if ($e -notmatch [regex]::Escape($name)) {
-              throw "Missing export: $name"
-            }
+          foreach ($name in @("lm_api_version","lm_chat_apply_template","lm_sampler_create","lm_sampler_sample")) {
+            if ($e -notmatch [regex]::Escape($name)) { throw "Missing export: $name" }
+          }
+          Write-Host "[PASS] Bridge API v5 exports present"
+
+      - name: Stage Phase 3C.3A runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = Join-Path $env:GITHUB_WORKSPACE "artifact-runtime"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+
+          foreach ($name in @("leanmoe_bridge.dll","llama-common.dll","llama.dll","ggml.dll","ggml-base.dll","ggml-cpu.dll","ggml-cuda.dll")) {
+            $file = Get-ChildItem build/bridge -Recurse -File -Filter $name | Select-Object -First 1
+            if (-not $file) { throw "Required runtime DLL not found: $name" }
+            Copy-Item $file.FullName (Join-Path $stage $name) -Force
+            Write-Host "[STAGE] $name <- $($file.FullName)"
           }
 
-          Write-Host "[PASS] Bridge API v5 exports present"
+          $cudaBin = Join-Path $env:CUDA_PATH "bin"
+          foreach ($name in @("cublas64_13.dll","cublasLt64_13.dll")) {
+            $src = Join-Path $cudaBin $name
+            if (-not (Test-Path $src)) { throw "Required CUDA DLL not found: $src" }
+            Copy-Item $src (Join-Path $stage $name) -Force
+          }
+
+          $vcomp = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\2022" -Recurse -File -Filter vcomp140.dll -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+          if ($vcomp) { Copy-Item $vcomp.FullName (Join-Path $stage "vcomp140.dll") -Force }
+
+          Copy-Item bridge-exports.txt (Join-Path $stage "bridge-exports.txt") -Force
+          Get-ChildItem $stage | Sort-Object Name | Select-Object Name,Length | Format-Table -AutoSize
+
+      - name: Smoke-load staged runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = Join-Path $env:GITHUB_WORKSPACE "artifact-runtime"
+          $env:PATH = "$stage;$env:PATH"
+          Set-Location $stage
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public static class LeanMoEBridgeSmoke {
+              [DllImport("leanmoe_bridge.dll", CallingConvention = CallingConvention.Cdecl)]
+              public static extern UInt32 lm_api_version();
+          }
+          "@
+          $version = [LeanMoEBridgeSmoke]::lm_api_version()
+          Write-Host "Bridge API: $version"
+          if ($version -ne 5) { throw "Expected Bridge API 5, got $version" }
+          Write-Host "[PASS] Staged runtime loads and reports API v5"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: leanmoe-phase3c3a-bridge-v5
-          path: |
-            build/bridge/**/leanmoe_bridge.dll
-            bridge-exports.txt
+          name: leanmoe-phase3c3a-runtime-v5
+          path: artifact-runtime/*
+          if-no-files-found: error
+          retention-days: 14
