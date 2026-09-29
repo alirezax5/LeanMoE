@@ -311,7 +311,7 @@ class LeanMoEBackend:
 
         self._last_finish_reason = None
         cfg = sampling or SamplingConfig()
-        with NativeSampler(bridge, cfg) as sampler:
+        with NativeSampler(bridge, self._model, cfg) as sampler:
             for _ in range(max_tokens):
                 token = sampler.sample(self._context)
                 if bridge.token_is_eog(self._model, token):
@@ -347,7 +347,7 @@ class LeanMoEBackend:
         """Generate on a fresh context.
 
         sampling=None preserves the Phase-3A legacy argmax path.
-        Passing SamplingConfig uses the Bridge API v4 native sampler, including
+        Passing SamplingConfig uses the Bridge API9 native sampler, including
         SamplingConfig(greedy=True) when native-greedy behavior is desired.
         """
         self._require_open()

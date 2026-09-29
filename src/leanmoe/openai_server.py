@@ -90,7 +90,10 @@ class LeanMoEOpenAIServer:
         temperature=body.get("temperature",0.8); top_p=body.get("top_p",0.95); seed=body.get("seed",12345)
         if not isinstance(temperature,(int,float)) or isinstance(temperature,bool) or not 0<=float(temperature)<=2: raise ValueError("temperature must be numeric between 0 and 2")
         if not isinstance(top_p,(int,float)) or isinstance(top_p,bool) or not 0<float(top_p)<=1: raise ValueError("top_p must be numeric, > 0 and <= 1")
-        if not isinstance(seed,int) or isinstance(seed,bool): raise ValueError("seed must be an integer")
+        if not isinstance(seed,int) or isinstance(seed,bool) or not 0<=seed<=0xFFFFFFFF: raise ValueError("seed must be an integer in [0, 2^32-1]")
+        frequency_penalty=body.get("frequency_penalty",0.0); presence_penalty=body.get("presence_penalty",0.0)
+        if not isinstance(frequency_penalty,(int,float)) or isinstance(frequency_penalty,bool) or not -2<=float(frequency_penalty)<=2: raise ValueError("frequency_penalty must be numeric between -2 and 2")
+        if not isinstance(presence_penalty,(int,float)) or isinstance(presence_penalty,bool) or not -2<=float(presence_penalty)<=2: raise ValueError("presence_penalty must be numeric between -2 and 2")
         stop=body.get("stop")
         if stop is not None:
             if isinstance(stop,str):
@@ -106,7 +109,7 @@ class LeanMoEOpenAIServer:
             if not isinstance(so,dict): raise ValueError("stream_options must be an object")
             if set(so)-{"include_usage"}: raise ValueError("unsupported stream_options field")
             if "include_usage" in so and not isinstance(so["include_usage"],bool): raise ValueError("stream_options.include_usage must be a boolean")
-        sampling=SamplingConfig(greedy=True) if float(temperature)==0 else SamplingConfig(greedy=False,temperature=float(temperature),top_k=40,top_p=float(top_p),min_p=0.05,seed=seed)
+        sampling=SamplingConfig(greedy=float(temperature)==0,temperature=float(temperature) if float(temperature)>0 else 0.8,top_k=40,top_p=float(top_p),min_p=0.05,seed=seed,penalty_last_n=64,repeat_penalty=1.0,frequency_penalty=float(frequency_penalty),presence_penalty=float(presence_penalty))
         return messages,max_tokens,sampling
 
     def _generate(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -248,7 +251,7 @@ class LeanMoEOpenAIServer:
     def make_handler(self):
         owner=self
         class Handler(BaseHTTPRequestHandler):
-            server_version="LeanMoE/3D.2B"; protocol_version="HTTP/1.1"
+            server_version="LeanMoE/3D.3B"; protocol_version="HTTP/1.1"
             def log_message(self,fmt: str,*args: Any)->None: print("[HTTP] "+(fmt % args))
             def _send(self,status: int,obj: Any)->None:
                 payload=_json_bytes(obj); self.send_response(status)
@@ -263,7 +266,7 @@ class LeanMoEOpenAIServer:
                 self.end_headers(); self.wfile.write(payload)
             def do_GET(self)->None:
                 path=self.path.split("?",1)[0]
-                if path=="/health": self._send(200,{"status":"ok","phase":"3D.2B","model":owner.model_id})
+                if path=="/health": self._send(200,{"status":"ok","phase":"3D.3B","model":owner.model_id})
                 elif path=="/v1/models": self._send(200,{"object":"list","data":[{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"}]})
                 elif path==f"/v1/models/{owner.model_id}": self._send(200,{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"})
                 elif path.startswith("/v1/models/"): self._error(404,"Model not found",param="model",code="model_not_found")
@@ -321,7 +324,7 @@ class LeanMoEOpenAIServer:
 
     def serve_forever(self) -> None:
         self._httpd = ThreadingHTTPServer((self.host, self.port), self.make_handler())
-        print(f"LeanMoE Phase 3D.2B listening on http://{self.host}:{self.port}")
+        print(f"LeanMoE Phase 3D.3B listening on http://{self.host}:{self.port}")
         print(f"Model: {self.model_id}")
         self._httpd.serve_forever()
 
