@@ -1242,6 +1242,7 @@ lm_result lm_chat_parse_output(
             common_chat_templates_apply(templates.get(), inputs);
 
         common_chat_parser_params parser_params(chat_params);
+        parser_params.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
         parser_params.parser.load(chat_params.parser);
 
         const common_chat_msg parsed = common_chat_parse(
