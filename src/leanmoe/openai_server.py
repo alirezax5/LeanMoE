@@ -17,22 +17,37 @@ def _json_bytes(obj: Any) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _validate_tool_calls(calls: Any, where: str) -> None:
+    if not isinstance(calls, list) or not calls: raise ValueError(f"{where} must be a non-empty array")
+    for i, c in enumerate(calls):
+        if not isinstance(c, dict) or c.get("type") != "function": raise ValueError(f"{where}[{i}] must be a function tool call")
+        if not isinstance(c.get("id"), str) or not c["id"]: raise ValueError(f"{where}[{i}].id is required")
+        f=c.get("function")
+        if not isinstance(f, dict) or not isinstance(f.get("name"), str) or not f["name"]: raise ValueError(f"{where}[{i}].function.name is required")
+        if not isinstance(f.get("arguments"), str): raise ValueError(f"{where}[{i}].function.arguments must be a JSON string")
+
+def _validate_tools(tools: Any) -> None:
+    if tools is None: return
+    if not isinstance(tools, list) or not tools: raise ValueError("tools must be a non-empty array")
+    for i,t in enumerate(tools):
+        if not isinstance(t,dict) or t.get("type")!="function": raise ValueError(f"tools[{i}] must be a function tool")
+        f=t.get("function")
+        if not isinstance(f,dict) or not isinstance(f.get("name"),str) or not f["name"]: raise ValueError(f"tools[{i}].function.name is required")
+        if "parameters" in f and not isinstance(f["parameters"],dict): raise ValueError(f"tools[{i}].function.parameters must be an object")
+
 def messages_to_prompt(messages: list[dict[str, Any]]) -> str:
-    if not isinstance(messages, list) or not messages:
-        raise ValueError("messages must be a non-empty array")
-    parts: list[str] = []
-    for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            raise ValueError(f"messages[{i}] must be an object")
-        role = msg.get("role")
-        content = msg.get("content")
-        if role not in {"system", "user", "assistant"}:
-            raise ValueError(f"unsupported role at messages[{i}]: {role!r}")
-        if not isinstance(content, str):
-            raise ValueError(f"messages[{i}].content must be a string")
-        parts.append(f"<|{role}|>\n{content}\n")
-    parts.append("<|assistant|>\n")
-    return "".join(parts)
+    if not isinstance(messages,list) or not messages: raise ValueError("messages must be a non-empty array")
+    for i,m in enumerate(messages):
+        if not isinstance(m,dict): raise ValueError(f"messages[{i}] must be an object")
+        role=m.get("role"); content=m.get("content")
+        if role not in {"system","developer","user","assistant","tool"}: raise ValueError(f"unsupported role at messages[{i}]: {role!r}")
+        if role=="assistant":
+            if content is not None and not isinstance(content,str): raise ValueError(f"messages[{i}].content must be a string or null")
+            if m.get("tool_calls") is not None: _validate_tool_calls(m["tool_calls"],f"messages[{i}].tool_calls")
+            if content is None and not m.get("tool_calls"): raise ValueError(f"messages[{i}] needs content or tool_calls")
+        elif not isinstance(content,str): raise ValueError(f"messages[{i}].content must be a string")
+        if role=="tool" and (not isinstance(m.get("tool_call_id"),str) or not m["tool_call_id"]): raise ValueError(f"messages[{i}].tool_call_id is required")
+    return ""
 
 
 def _stop_list(body: dict[str, Any]) -> list[str]:
@@ -80,8 +95,18 @@ class LeanMoEOpenAIServer:
         if not isinstance(model,str) or not model: raise ValueError("model is required and must be a non-empty string")
         if model!=self.model_id: raise ValueError(f"unknown model: {model!r}")
         messages=body.get("messages"); messages_to_prompt(messages)
+        tools=body.get("tools"); _validate_tools(tools)
+        tool_choice=body.get("tool_choice","auto")
+        if not isinstance(tool_choice,str) or tool_choice not in {"auto","none","required"}: raise ValueError("tool_choice must be auto, none, or required")
+        if tools is None and tool_choice!="auto": raise ValueError("tool_choice requires tools")
+        parallel_tool_calls=body.get("parallel_tool_calls",True)
+        if not isinstance(parallel_tool_calls,bool): raise ValueError("parallel_tool_calls must be a boolean")
         stream=body.get("stream",False)
         if not isinstance(stream,bool): raise ValueError("stream must be a boolean")
+        if stream and tools is not None: raise ValueError("streaming tool calls are not supported in Phase 3D.4C1")
+        if "n" in body and (not isinstance(body["n"],int) or isinstance(body["n"],bool) or body["n"]!=1): raise ValueError("n must be 1")
+        if body.get("logprobs") not in (None,False) or "top_logprobs" in body: raise ValueError("logprobs are not supported")
+        if "response_format" in body and body["response_format"]!={"type":"text"}: raise ValueError("only response_format.type='text' is supported")
         thinking=body.get("enable_thinking",True)
         if not isinstance(thinking,bool): raise ValueError("enable_thinking must be a boolean")
         if "max_tokens" in body and "max_completion_tokens" in body: raise ValueError("use only one of max_tokens or max_completion_tokens")
@@ -120,9 +145,14 @@ class LeanMoEOpenAIServer:
             raise RuntimeError("inference_busy")
         try:
             with LeanMoEBackend(self.runtime_dir,self.model_path,self.backend_config) as backend:
-                prompt=backend._bridge.chat_apply_template(
-                    backend._model,[(m["role"],m["content"]) for m in messages],
-                    add_generation_prompt=True,enable_thinking=enable_thinking)
+                tools=body.get("tools")
+                structured=tools is not None or any(m.get("role") in {"developer","tool"} or m.get("tool_calls") for m in messages)
+                if structured:
+                    meta=backend._bridge.chat_apply_structured(backend._model,messages,tools,tool_choice=body.get("tool_choice","auto"),add_generation_prompt=True,enable_thinking=enable_thinking,parallel_tool_calls=body.get("parallel_tool_calls",True))
+                    prompt=meta.get("prompt")
+                    if not isinstance(prompt,str) or not prompt: raise RuntimeError("structured renderer returned no prompt")
+                else:
+                    prompt=backend._bridge.chat_apply_template(backend._model,[(m["role"],m["content"]) for m in messages],add_generation_prompt=True,enable_thinking=enable_thinking)
                 prompt_ids=backend.tokenize_chat_prompt(prompt)
                 if not prompt_ids:
                     raise ValueError("Prompt tokenized to zero tokens")
@@ -141,8 +171,10 @@ class LeanMoEOpenAIServer:
                 finally:
                     gen.close()
                 raw,stop_hit=_cut_at_stop("".join(pieces),stops)
-                parsed=backend._bridge.chat_parse_output(
-                    backend._model,raw,enable_thinking=enable_thinking,is_partial=False)
+                if structured:
+                    parsed=backend._bridge.chat_parse_output_structured(backend._model,messages,raw,tools,tool_choice=body.get("tool_choice","auto"),enable_thinking=enable_thinking,parallel_tool_calls=body.get("parallel_tool_calls",True),is_partial=False)
+                else:
+                    parsed=backend._bridge.chat_parse_output(backend._model,raw,enable_thinking=enable_thinking,is_partial=False)
                 finish_reason="stop" if stop_hit else (backend.last_finish_reason or "length")
         finally:
             self._lock.release()
@@ -150,6 +182,17 @@ class LeanMoEOpenAIServer:
         reasoning=parsed.get("reasoning_content","")
         if reasoning:
             message["reasoning_content"]=reasoning.rstrip()
+        if parsed.get("tool_calls"):
+            normalized_calls=[]
+            for call in parsed["tool_calls"]:
+                normalized=dict(call)
+                call_id=normalized.get("id")
+                if not isinstance(call_id,str) or not call_id:
+                    normalized["id"]="call_"+uuid.uuid4().hex
+                normalized_calls.append(normalized)
+            message["tool_calls"]=normalized_calls
+            if not message["content"]: message["content"]=None
+            finish_reason="tool_calls"
         return {"id":"chatcmpl-"+uuid.uuid4().hex,"object":"chat.completion","created":int(time.time()),
                 "model":self.model_id,"choices":[{"index":0,"message":message,"finish_reason":finish_reason}],
                 "usage":{"prompt_tokens":len(prompt_ids),"completion_tokens":generated_tokens,
@@ -251,7 +294,7 @@ class LeanMoEOpenAIServer:
     def make_handler(self):
         owner=self
         class Handler(BaseHTTPRequestHandler):
-            server_version="LeanMoE/3D.3B"; protocol_version="HTTP/1.1"
+            server_version="LeanMoE/3D.4C1"; protocol_version="HTTP/1.1"
             def log_message(self,fmt: str,*args: Any)->None: print("[HTTP] "+(fmt % args))
             def _send(self,status: int,obj: Any)->None:
                 payload=_json_bytes(obj); self.send_response(status)
@@ -266,7 +309,7 @@ class LeanMoEOpenAIServer:
                 self.end_headers(); self.wfile.write(payload)
             def do_GET(self)->None:
                 path=self.path.split("?",1)[0]
-                if path=="/health": self._send(200,{"status":"ok","phase":"3D.3B","model":owner.model_id})
+                if path=="/health": self._send(200,{"status":"ok","phase":"3D.4C1","model":owner.model_id})
                 elif path=="/v1/models": self._send(200,{"object":"list","data":[{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"}]})
                 elif path==f"/v1/models/{owner.model_id}": self._send(200,{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"})
                 elif path.startswith("/v1/models/"): self._error(404,"Model not found",param="model",code="model_not_found")
@@ -324,7 +367,7 @@ class LeanMoEOpenAIServer:
 
     def serve_forever(self) -> None:
         self._httpd = ThreadingHTTPServer((self.host, self.port), self.make_handler())
-        print(f"LeanMoE Phase 3D.3B listening on http://{self.host}:{self.port}")
+        print(f"LeanMoE Phase 3D.4C1 listening on http://{self.host}:{self.port}")
         print(f"Model: {self.model_id}")
         self._httpd.serve_forever()
 
