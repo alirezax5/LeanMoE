@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import threading
 import time
 import uuid
@@ -88,6 +89,8 @@ class LeanMoEOpenAIServer:
         self.backend_config = backend_config or BackendConfig()
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
+        self._ready = False
+        self._stopping = False
 
     def _request_config(self, body: dict[str, Any]):
         if not isinstance(body,dict): raise ValueError("request body must be a JSON object")
@@ -314,10 +317,11 @@ class LeanMoEOpenAIServer:
                           "usage":{"prompt_tokens":len(prompt_ids),"completion_tokens":completion_tokens,
                                    "total_tokens":len(prompt_ids)+completion_tokens}})
         finally:
-            if acquired_here and self._lock.locked():
+            # This invocation owns exactly one acquisition: either acquired
+            # here or transferred by Handler. Never inspect Lock.locked()
+            # because threading.Lock is not ownership-aware.
+            if acquired_here or lock_held:
                 self._lock.release()
-        if lock_held and self._lock.locked():
-            self._lock.release()
         handler.wfile.write(b"data: [DONE]\n\n"); handler.wfile.flush()
 
     def make_handler(self):
@@ -338,7 +342,13 @@ class LeanMoEOpenAIServer:
                 self.end_headers(); self.wfile.write(payload)
             def do_GET(self)->None:
                 path=self.path.split("?",1)[0]
-                if path=="/health": self._send(200,{"status":"ok","phase":"3D.4C3A-C2","model":owner.model_id})
+                if path=="/health":
+                    self._send(200,{"status":"ok","phase":"3E.3","model":owner.model_id})
+                elif path=="/readyz":
+                    if owner._ready and not owner._stopping:
+                        self._send(200,{"status":"ready","phase":"3E.3","model":owner.model_id})
+                    else:
+                        self._send(503,{"status":"not_ready","phase":"3E.3","model":owner.model_id})
                 elif path=="/v1/models": self._send(200,{"object":"list","data":[{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"}]})
                 elif path==f"/v1/models/{owner.model_id}": self._send(200,{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"})
                 elif path.startswith("/v1/models/"): self._error(404,"Model not found",param="model",code="model_not_found")
@@ -369,8 +379,10 @@ class LeanMoEOpenAIServer:
                             except (BrokenPipeError,ConnectionResetError): print("[INFO] streaming client disconnected")
                             finally: self.close_connection=True
                         finally:
-                            if owner._lock.locked():
-                                owner._lock.release()
+                            # Lock ownership was transferred to _stream().
+                            # _stream() releases it after backend teardown,
+                            # before terminal [DONE]. Do not cross-release here.
+                            pass
                     else: self._send(200,owner._generate(body))
                 except ValueError as exc:
                     if started: print("[ERROR] streaming validation:",exc); self.close_connection=True
@@ -397,11 +409,20 @@ class LeanMoEOpenAIServer:
 
     def serve_forever(self) -> None:
         self._httpd = ThreadingHTTPServer((self.host, self.port), self.make_handler())
-        print(f"LeanMoE Phase 3D.4C3A-C2 listening on http://{self.host}:{self.port}")
+        self._httpd.daemon_threads = True
+        self._ready = True
+        print(f"LeanMoE Phase 3E.3 listening on http://{self.host}:{self.port}")
         print(f"Model: {self.model_id}")
-        self._httpd.serve_forever()
+        try:
+            self._httpd.serve_forever()
+        finally:
+            self._ready = False
+            self._stopping = True
+            self._httpd.server_close()
 
     def shutdown(self) -> None:
+        self._stopping = True
+        self._ready = False
         if self._httpd is not None:
             self._httpd.shutdown()
 
@@ -419,10 +440,30 @@ def main() -> int:
         n_batch=1024, n_ubatch=1024, flash_attn=1,
         offload_kqv=1, use_mmap=1, use_mlock=0,
     )
-    LeanMoEOpenAIServer(
+    server = LeanMoEOpenAIServer(
         a.runtime.resolve(), a.model.resolve(), a.host, a.port,
         a.model_id, cfg
-    ).serve_forever()
+    )
+
+    shutdown_started = threading.Event()
+    def request_shutdown(signum, frame) -> None:
+        if shutdown_started.is_set():
+            return
+        shutdown_started.set()
+        print(f"[INFO] shutdown requested by signal {signum}")
+        # BaseServer.shutdown() must be called from a thread other than the
+        # serve_forever() thread or it can deadlock.
+        threading.Thread(target=server.shutdown, name="leanmoe-shutdown", daemon=True).start()
+
+    for sig_name in ("SIGINT","SIGTERM","SIGBREAK"):
+        sig=getattr(signal,sig_name,None)
+        if sig is not None:
+            signal.signal(sig,request_shutdown)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        request_shutdown(getattr(signal,"SIGINT",2),None)
     return 0
 
 if __name__ == "__main__":
