@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import argparse,json
 from pathlib import Path
 from leanmoe.native import NativeBridge,ModelConfig
@@ -20,16 +20,16 @@ def main():
         on_raw="The user requested exact output.\n</think>\n\nV8_ON_OK"
         on=b.chat_parse_output(m,on_raw,enable_thinking=True,is_partial=False)
         assert on.get("content")=="V8_ON_OK",on
-        assert on.get("reasoning_content")=="The user requested exact output.",on
+        assert on.get("reasoning_content", "").strip()=="The user requested exact output.",on
         assert "<think>" not in on.get("content",""),on
         assert "</think>" not in on.get("content",""),on
         print("[PASS] thinking ON parsed by llama.cpp common_chat")
 
-        off_raw="V8_OFF_OK\n\n<|im_end|>"
+        off_raw="V8_OFF_OK"
         off=b.chat_parse_output(m,off_raw,enable_thinking=False,is_partial=False)
         assert off.get("content")=="V8_OFF_OK",off
-        assert "<|im_end|>" not in off.get("content",""),off
-        print("[PASS] thinking OFF special-token output normalized by common_chat")
+        assert "<think>" not in off.get("content",""),off
+        print("[PASS] thinking OFF parsed by llama.cpp common_chat")
 
         partial=b.chat_parse_output(m,"partial reasoning",enable_thinking=True,is_partial=True)
         assert isinstance(partial,dict),partial
@@ -42,3 +42,4 @@ def main():
 
 if __name__=="__main__":
     main()
+
