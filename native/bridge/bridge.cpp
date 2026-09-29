@@ -3,6 +3,7 @@
 
 #include "llama.h"
 #include "chat.h"
+#include "json.h"
 
 #include <exception>
 #include <cmath>
@@ -1373,6 +1374,79 @@ lm_result lm_chat_parse_output(
     }
 }
 
+
+
+lm_result lm_chat_apply_structured(
+    lm_model_t model, const char * messages_json_utf8, const char * tools_json_utf8,
+    const char * tool_choice_utf8, uint8_t add_generation_prompt, uint8_t enable_thinking,
+    uint8_t parallel_tool_calls, char * buffer, int32_t buffer_size, int32_t * out_size
+) {
+    clear_error();
+    if (!g_initialized) { set_error("LeanMoE bridge is not initialized"); return LM_ERROR_NOT_INITIALIZED; }
+    if (!model || !messages_json_utf8 || !tools_json_utf8 || !tool_choice_utf8 || !out_size || buffer_size < 0) {
+        set_error("Invalid structured chat argument"); return LM_ERROR_INVALID_ARGUMENT;
+    }
+    const auto * w=static_cast<const lm_model_wrapper *>(model);
+    if (!w->model) { set_error("Internal llama model pointer is null"); return LM_ERROR_INVALID_ARGUMENT; }
+    try {
+        auto tmpls=common_chat_templates_init(w->model,"");
+        if (!tmpls) { set_error("common_chat_templates_init() returned null"); return LM_ERROR_INTERNAL; }
+        common_chat_templates_inputs in;
+        in.messages=common_chat_msgs_parse_oaicompat(common_json::parse(messages_json_utf8));
+        in.tools=common_chat_tools_parse_oaicompat(common_json::parse(tools_json_utf8));
+        in.tool_choice=common_chat_tool_choice_parse_oaicompat(tool_choice_utf8);
+        in.add_generation_prompt=add_generation_prompt != 0; in.use_jinja=true;
+        in.enable_thinking=enable_thinking != 0; in.parallel_tool_calls=parallel_tool_calls != 0;
+        in.reasoning_format=COMMON_REASONING_FORMAT_AUTO;
+        const common_chat_params p=common_chat_templates_apply(tmpls.get(),in);
+        common_json j={{"prompt",p.prompt},{"parser",p.parser},{"generation_prompt",p.generation_prompt},
+                       {"supports_thinking",p.supports_thinking},{"thinking_start_tag",p.thinking_start_tag},
+                       {"thinking_end_tags",p.thinking_end_tags},{"additional_stops",p.additional_stops},
+                       {"preserved_tokens",p.preserved_tokens}};
+        const std::string out=j.dump();
+        if(out.size()>static_cast<size_t>(std::numeric_limits<int32_t>::max())) { set_error("Structured chat result too large"); return LM_ERROR_INTERNAL; }
+        *out_size=static_cast<int32_t>(out.size());
+        if(!buffer || buffer_size<=*out_size) return LM_ERROR_BUFFER_TOO_SMALL;
+        if(*out_size) std::memcpy(buffer,out.data(),out.size()); buffer[*out_size]='\0'; return LM_OK;
+    } catch(const std::bad_alloc&) { set_error("Out of memory while applying structured chat"); return LM_ERROR_OUT_OF_MEMORY; }
+      catch(const std::exception& e) { set_error(e.what()); return LM_ERROR_BACKEND; }
+      catch(...) { set_error("Unknown exception while applying structured chat"); return LM_ERROR_BACKEND; }
+}
+
+lm_result lm_chat_parse_output_structured(
+    lm_model_t model, const char * messages_json_utf8, const char * tools_json_utf8,
+    const char * tool_choice_utf8, const char * generated_utf8, uint8_t enable_thinking,
+    uint8_t parallel_tool_calls, uint8_t is_partial, char * buffer, int32_t buffer_size,
+    int32_t * out_size
+) {
+    clear_error();
+    if (!g_initialized) { set_error("LeanMoE bridge is not initialized"); return LM_ERROR_NOT_INITIALIZED; }
+    if (!model || !messages_json_utf8 || !tools_json_utf8 || !tool_choice_utf8 || !generated_utf8 || !out_size || buffer_size < 0) {
+        set_error("Invalid structured chat parse argument"); return LM_ERROR_INVALID_ARGUMENT;
+    }
+    const auto * w=static_cast<const lm_model_wrapper *>(model);
+    if (!w->model) { set_error("Internal llama model pointer is null"); return LM_ERROR_INVALID_ARGUMENT; }
+    try {
+        auto tmpls=common_chat_templates_init(w->model,"");
+        if (!tmpls) { set_error("common_chat_templates_init() returned null"); return LM_ERROR_INTERNAL; }
+        common_chat_templates_inputs in;
+        in.messages=common_chat_msgs_parse_oaicompat(common_json::parse(messages_json_utf8));
+        in.tools=common_chat_tools_parse_oaicompat(common_json::parse(tools_json_utf8));
+        in.tool_choice=common_chat_tool_choice_parse_oaicompat(tool_choice_utf8);
+        in.add_generation_prompt=true; in.use_jinja=true; in.enable_thinking=enable_thinking != 0;
+        in.parallel_tool_calls=parallel_tool_calls != 0; in.reasoning_format=COMMON_REASONING_FORMAT_AUTO;
+        const common_chat_params cp=common_chat_templates_apply(tmpls.get(),in);
+        common_chat_parser_params pp(cp); pp.reasoning_format=COMMON_REASONING_FORMAT_AUTO; pp.parser.load(cp.parser);
+        const common_chat_msg msg=common_chat_parse(std::string(generated_utf8),is_partial != 0,pp);
+        const std::string out=msg.to_json_oaicompat(false).dump();
+        if(out.size()>static_cast<size_t>(std::numeric_limits<int32_t>::max())) { set_error("Structured parsed output too large"); return LM_ERROR_INTERNAL; }
+        *out_size=static_cast<int32_t>(out.size());
+        if(!buffer || buffer_size<=*out_size) return LM_ERROR_BUFFER_TOO_SMALL;
+        if(*out_size) std::memcpy(buffer,out.data(),out.size()); buffer[*out_size]='\0'; return LM_OK;
+    } catch(const std::bad_alloc&) { set_error("Out of memory while parsing structured chat"); return LM_ERROR_OUT_OF_MEMORY; }
+      catch(const std::exception& e) { set_error(e.what()); return LM_ERROR_BACKEND; }
+      catch(...) { set_error("Unknown exception while parsing structured chat"); return LM_ERROR_BACKEND; }
+}
 
 uint64_t lm_model_size(lm_model_t model) {
     if (model == nullptr) {

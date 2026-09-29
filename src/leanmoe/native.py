@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 
-BRIDGE_API_VERSION = 9
+BRIDGE_API_VERSION = 10
 
 LM_OK = 0
 LM_ERROR_INVALID_ARGUMENT = -1
@@ -226,6 +226,18 @@ class NativeBridge:
             ctypes.POINTER(ctypes.c_int32),
         ]
         dll.lm_chat_parse_output.restype = ctypes.c_int
+        dll.lm_chat_apply_structured.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8,
+            ctypes.POINTER(ctypes.c_char), ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
+        ]
+        dll.lm_chat_apply_structured.restype = ctypes.c_int
+        dll.lm_chat_parse_output_structured.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8,
+            ctypes.POINTER(ctypes.c_char), ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
+        ]
+        dll.lm_chat_parse_output_structured.restype = ctypes.c_int
 
         # Metadata
         dll.lm_model_size.argtypes = [ctypes.c_void_p]
@@ -240,6 +252,41 @@ class NativeBridge:
             ctypes.c_size_t,
         ]
         dll.lm_model_description.restype = ctypes.c_int
+
+    @staticmethod
+    def _chat_json_bytes(value) -> bytes:
+        import json
+        return json.dumps(value,ensure_ascii=False,separators=(",",":")).encode("utf-8")
+
+    def chat_apply_structured(self,model,messages,tools=None,*,tool_choice="auto",
+                              add_generation_prompt=True,enable_thinking=True,parallel_tool_calls=True):
+        import json
+        if tool_choice not in {"auto","none","required"}: raise ValueError("unsupported tool_choice")
+        mb=self._chat_json_bytes(messages); tb=self._chat_json_bytes(tools); cb=tool_choice.encode()
+        need=ctypes.c_int32()
+        rc=self.dll.lm_chat_apply_structured(model,mb,tb,cb,int(add_generation_prompt),int(enable_thinking),
+                                             int(parallel_tool_calls),None,0,ctypes.byref(need))
+        if rc != LM_ERROR_BUFFER_TOO_SMALL: self.check(rc,"lm_chat_apply_structured(size query)")
+        size=need.value+1; buf=ctypes.create_string_buffer(size); actual=ctypes.c_int32()
+        rc=self.dll.lm_chat_apply_structured(model,mb,tb,cb,int(add_generation_prompt),int(enable_thinking),
+                                             int(parallel_tool_calls),buf,size,ctypes.byref(actual))
+        self.check(rc,"lm_chat_apply_structured()")
+        return json.loads(bytes(buf.raw[:actual.value]).decode("utf-8"))
+
+    def chat_parse_output_structured(self,model,messages,generated,tools=None,*,tool_choice="auto",
+                                     enable_thinking=True,parallel_tool_calls=True,is_partial=False):
+        import json
+        if tool_choice not in {"auto","none","required"}: raise ValueError("unsupported tool_choice")
+        mb=self._chat_json_bytes(messages); tb=self._chat_json_bytes(tools); cb=tool_choice.encode(); gb=str(generated).encode()
+        need=ctypes.c_int32()
+        rc=self.dll.lm_chat_parse_output_structured(model,mb,tb,cb,gb,int(enable_thinking),int(parallel_tool_calls),
+                                                     int(is_partial),None,0,ctypes.byref(need))
+        if rc != LM_ERROR_BUFFER_TOO_SMALL: self.check(rc,"lm_chat_parse_output_structured(size query)")
+        size=need.value+1; buf=ctypes.create_string_buffer(size); actual=ctypes.c_int32()
+        rc=self.dll.lm_chat_parse_output_structured(model,mb,tb,cb,gb,int(enable_thinking),int(parallel_tool_calls),
+                                                     int(is_partial),buf,size,ctypes.byref(actual))
+        self.check(rc,"lm_chat_parse_output_structured()")
+        return json.loads(bytes(buf.raw[:actual.value]).decode("utf-8"))
 
     def api_version(self) -> int:
         return int(self.dll.lm_api_version())

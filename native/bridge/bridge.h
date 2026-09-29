@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 9u
+#define LM_BRIDGE_API_VERSION 10u
 
 typedef void * lm_model_t;
 
@@ -331,6 +331,19 @@ LM_API lm_result lm_chat_parse_output(
     uint8_t is_partial,
     char * buffer,
     int32_t buffer_size,
+    int32_t * out_size
+);
+
+/* Bridge API v10: structured OpenAI-compatible chat + tools. */
+LM_API lm_result lm_chat_apply_structured(
+    lm_model_t model, const char * messages_json_utf8, const char * tools_json_utf8,
+    const char * tool_choice_utf8, uint8_t add_generation_prompt, uint8_t enable_thinking,
+    uint8_t parallel_tool_calls, char * buffer, int32_t buffer_size, int32_t * out_size
+);
+LM_API lm_result lm_chat_parse_output_structured(
+    lm_model_t model, const char * messages_json_utf8, const char * tools_json_utf8,
+    const char * tool_choice_utf8, const char * generated_utf8, uint8_t enable_thinking,
+    uint8_t parallel_tool_calls, uint8_t is_partial, char * buffer, int32_t buffer_size,
     int32_t * out_size
 );
 
