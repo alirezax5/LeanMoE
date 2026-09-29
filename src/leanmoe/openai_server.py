@@ -313,14 +313,17 @@ class LeanMoEOpenAIServer:
                     send({"id":cid,"object":"chat.completion.chunk","created":created,"model":self.model_id,"choices":[],
                           "usage":{"prompt_tokens":len(prompt_ids),"completion_tokens":completion_tokens,
                                    "total_tokens":len(prompt_ids)+completion_tokens}})
-                handler.wfile.write(b"data: [DONE]\n\n"); handler.wfile.flush()
         finally:
-            if acquired_here: self._lock.release()
+            if acquired_here and self._lock.locked():
+                self._lock.release()
+        if lock_held and self._lock.locked():
+            self._lock.release()
+        handler.wfile.write(b"data: [DONE]\n\n"); handler.wfile.flush()
 
     def make_handler(self):
         owner=self
         class Handler(BaseHTTPRequestHandler):
-            server_version="LeanMoE/3D.4C2B"; protocol_version="HTTP/1.1"
+            server_version="LeanMoE/3D.4C3A-C2"; protocol_version="HTTP/1.1"
             def log_message(self,fmt: str,*args: Any)->None: print("[HTTP] "+(fmt % args))
             def _send(self,status: int,obj: Any)->None:
                 payload=_json_bytes(obj); self.send_response(status)
@@ -335,7 +338,7 @@ class LeanMoEOpenAIServer:
                 self.end_headers(); self.wfile.write(payload)
             def do_GET(self)->None:
                 path=self.path.split("?",1)[0]
-                if path=="/health": self._send(200,{"status":"ok","phase":"3D.4C2B","model":owner.model_id})
+                if path=="/health": self._send(200,{"status":"ok","phase":"3D.4C3A-C2","model":owner.model_id})
                 elif path=="/v1/models": self._send(200,{"object":"list","data":[{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"}]})
                 elif path==f"/v1/models/{owner.model_id}": self._send(200,{"id":owner.model_id,"object":"model","created":0,"owned_by":"leanmoe"})
                 elif path.startswith("/v1/models/"): self._error(404,"Model not found",param="model",code="model_not_found")
@@ -366,7 +369,8 @@ class LeanMoEOpenAIServer:
                             except (BrokenPipeError,ConnectionResetError): print("[INFO] streaming client disconnected")
                             finally: self.close_connection=True
                         finally:
-                            owner._lock.release()
+                            if owner._lock.locked():
+                                owner._lock.release()
                     else: self._send(200,owner._generate(body))
                 except ValueError as exc:
                     if started: print("[ERROR] streaming validation:",exc); self.close_connection=True
@@ -393,7 +397,7 @@ class LeanMoEOpenAIServer:
 
     def serve_forever(self) -> None:
         self._httpd = ThreadingHTTPServer((self.host, self.port), self.make_handler())
-        print(f"LeanMoE Phase 3D.4C2B listening on http://{self.host}:{self.port}")
+        print(f"LeanMoE Phase 3D.4C3A-C2 listening on http://{self.host}:{self.port}")
         print(f"Model: {self.model_id}")
         self._httpd.serve_forever()
 
