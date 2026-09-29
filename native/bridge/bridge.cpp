@@ -1136,6 +1136,64 @@ lm_result lm_chat_apply_template(
 }
 
 
+lm_result lm_chat_template_metadata(
+    lm_model_t model, uint8_t enable_thinking,
+    char * buffer, int32_t buffer_size, int32_t * out_size
+) {
+    clear_error();
+    if (!g_initialized) { set_error("LeanMoE bridge is not initialized"); return LM_ERROR_NOT_INITIALIZED; }
+    if (model == nullptr || out_size == nullptr || buffer_size < 0) {
+        set_error("Invalid chat metadata argument"); return LM_ERROR_INVALID_ARGUMENT;
+    }
+    const lm_model_wrapper * wrapper = static_cast<const lm_model_wrapper *>(model);
+    if (wrapper->model == nullptr) { set_error("Internal llama model pointer is null"); return LM_ERROR_INVALID_ARGUMENT; }
+    try {
+        auto templates = common_chat_templates_init(wrapper->model, "");
+        if (!templates) { set_error("common_chat_templates_init() returned null"); return LM_ERROR_INTERNAL; }
+        common_chat_msg probe; probe.role="user"; probe.content="test";
+        common_chat_templates_inputs inputs;
+        inputs.messages={probe}; inputs.add_generation_prompt=true; inputs.use_jinja=true;
+        inputs.enable_thinking=enable_thinking != 0;
+        const common_chat_params params=common_chat_templates_apply(templates.get(),inputs);
+
+        auto esc=[](const std::string &v) {
+            std::string o; o.reserve(v.size()+8); const char hex[]="0123456789abcdef";
+            for (unsigned char c:v) {
+                switch(c) {
+                    case '"':o+="\\\"";break; case '\\':o+="\\\\";break;
+                    case '\b':o+="\\b";break; case '\f':o+="\\f";break;
+                    case '\n':o+="\\n";break; case '\r':o+="\\r";break; case '\t':o+="\\t";break;
+                    default:
+                        if(c<0x20){o+="\\u00";o+=hex[(c>>4)&15];o+=hex[c&15];}
+                        else o.push_back(static_cast<char>(c));
+                }
+            } return o;
+        };
+        auto arr=[&](const std::vector<std::string>&v){
+            std::string o="[";
+            for(size_t i=0;i<v.size();++i){if(i)o+=",";o+="\""+esc(v[i])+"\"";}
+            return o+"]";
+        };
+        std::string j="{";
+        j+="\"supports_thinking\":"; j+=params.supports_thinking?"true":"false";
+        j+=",\"thinking_start_tag\":\""+esc(params.thinking_start_tag)+"\"";
+        j+=",\"thinking_end_tags\":"+arr(params.thinking_end_tags);
+        j+=",\"additional_stops\":"+arr(params.additional_stops);
+        j+=",\"preserved_tokens\":"+arr(params.preserved_tokens);
+        j+=",\"parser\":\""+esc(params.parser)+"\"";
+        j+=",\"generation_prompt\":\""+esc(params.generation_prompt)+"\"}";
+        if(j.size()>static_cast<size_t>(std::numeric_limits<int32_t>::max())){
+            set_error("Chat metadata is too large"); return LM_ERROR_INTERNAL;
+        }
+        *out_size=static_cast<int32_t>(j.size());
+        if(buffer==nullptr || buffer_size<=*out_size) return LM_ERROR_BUFFER_TOO_SMALL;
+        if(*out_size>0) std::memcpy(buffer,j.data(),j.size());
+        buffer[*out_size]='\0'; return LM_OK;
+    } catch(const std::bad_alloc&){set_error("Out of memory while reading chat metadata");return LM_ERROR_OUT_OF_MEMORY;}
+      catch(const std::exception& e){set_error(e.what());return LM_ERROR_BACKEND;}
+      catch(...){set_error("Unknown exception while reading chat metadata");return LM_ERROR_BACKEND;}
+}
+
 uint64_t lm_model_size(lm_model_t model) {
     if (model == nullptr) {
         return 0;

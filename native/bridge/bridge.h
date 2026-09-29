@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 6u
+#define LM_BRIDGE_API_VERSION 7u
 
 typedef void * lm_model_t;
 
@@ -282,6 +282,15 @@ LM_API lm_result lm_chat_apply_template(
     const lm_chat_message * messages,
     int32_t message_count,
     uint8_t add_generation_prompt,
+    uint8_t enable_thinking,
+    char * buffer,
+    int32_t buffer_size,
+    int32_t * out_size
+);
+
+/* Bridge API v7: model/template-derived common_chat_params as UTF-8 JSON. */
+LM_API lm_result lm_chat_template_metadata(
+    lm_model_t model,
     uint8_t enable_thinking,
     char * buffer,
     int32_t buffer_size,

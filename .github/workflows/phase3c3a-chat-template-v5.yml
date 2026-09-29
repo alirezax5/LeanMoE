@@ -58,7 +58,7 @@ jobs:
               loaded.append(ctypes.CDLL(str(d/n))); print("[PASS]",n)
           b=loaded[-1]; b.lm_api_version.restype=ctypes.c_uint32
           api=b.lm_api_version(); print("Bridge API:",api)
-          if api != 6: raise RuntimeError(f"Expected API 6, got {api}")
+          if api != 7: raise RuntimeError(f"Expected API 7, got {api}")
           '@ | python -
       - uses: actions/upload-artifact@v4
         with:
