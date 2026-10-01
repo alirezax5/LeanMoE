@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 11u
+#define LM_BRIDGE_API_VERSION 12u
 
 typedef void * lm_model_t;
 
@@ -97,6 +97,9 @@ typedef struct lm_context_config {
 
     uint8_t flash_attn;
     uint8_t offload_kqv;
+
+    int32_t n_threads;
+    int32_t n_threads_batch;
 
     uint8_t reserved[6];
 } lm_context_config;

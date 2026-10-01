@@ -304,6 +304,9 @@ lm_result lm_context_create(
         params.n_batch = config->n_batch;
         params.n_ubatch = config->n_ubatch;
 
+        if (config->n_threads > 0) { params.n_threads = config->n_threads; }
+        if (config->n_threads_batch > 0) { params.n_threads_batch = config->n_threads_batch; }
+
         switch (config->type_k) {
             case LM_KV_F16:
                 params.type_k = GGML_TYPE_F16;

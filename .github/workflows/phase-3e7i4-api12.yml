@@ -1,0 +1,40 @@
+name: phase-3e7i4-api12-thread-controls
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Checkout pinned llama.cpp
+        shell: pwsh
+        run: git -C external/llama.cpp checkout cea74625f
+      - name: Setup CUDA 13.4
+        uses: ./external/llama.cpp/.github/actions/windows-setup-cuda
+        with:
+          cuda_version: "13.4"
+          cuda_arch: "x64"
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake -S native/bridge -B build/bridge -G Ninja -DLLAMA_CPP_DIR="$pwd/external/llama.cpp" -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=89
+          cmake --build build/bridge
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force runtime/api12 | Out-Null
+          Get-ChildItem build/bridge -Recurse -Filter leanmoe_bridge.dll | Select-Object -First 1 | Copy-Item -Destination runtime/api12/leanmoe_bridge.dll
+          $names=@("llama.dll","llama-common.dll","ggml.dll","ggml-base.dll","ggml-cpu.dll","ggml-cuda.dll","cublas64_13.dll","cublasLt64_13.dll","libcrypto-3-x64.dll","libssl-3-x64.dll","vcomp140.dll")
+          foreach($n in $names){$f=Get-ChildItem build/bridge,external/llama.cpp -Recurse -Filter $n -ErrorAction SilentlyContinue|Select-Object -First 1;if($f){Copy-Item $f.FullName runtime/api12/$n}}
+      - name: Verify API12
+        shell: pwsh
+        run: |
+          $env:PATH="$pwd/runtime/api12;$env:PATH"
+          python -c "import ctypes;b=ctypes.CDLL(r'runtime/api12/leanmoe_bridge.dll');b.lm_api_version.restype=ctypes.c_uint32;print('API',b.lm_api_version());assert b.lm_api_version()==12"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leanmoe-phase3e7i4-api12-runtime
+          path: runtime/api12/*

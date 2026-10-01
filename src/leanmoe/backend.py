@@ -34,6 +34,8 @@ class BackendConfig:
     use_mlock: int = 0
     kv_type_k: int = LM_KV_Q8_0
     kv_type_v: int = LM_KV_Q8_0
+    n_threads: int = 0
+    n_threads_batch: int = 0
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,8 @@ class LeanMoEBackend:
                     type_v=self.config.kv_type_v,
                     flash_attn=self.config.flash_attn,
                     offload_kqv=self.config.offload_kqv,
+                n_threads=self.config.n_threads,
+                n_threads_batch=self.config.n_threads_batch,
                 ),
             )
         except BaseException:
@@ -200,6 +204,8 @@ class LeanMoEBackend:
                 n_ubatch=self.config.n_ubatch, type_k=self.config.kv_type_k,
                 type_v=self.config.kv_type_v, flash_attn=self.config.flash_attn,
                 offload_kqv=self.config.offload_kqv,
+            n_threads=self.config.n_threads,
+            n_threads_batch=self.config.n_threads_batch,
             ),
         )
         self._position = 0

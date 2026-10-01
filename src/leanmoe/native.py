@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 
-BRIDGE_API_VERSION = 11
+BRIDGE_API_VERSION = 12
 
 LM_OK = 0
 LM_ERROR_INVALID_ARGUMENT = -1
@@ -55,6 +55,8 @@ class ContextConfig(ctypes.Structure):
         ("type_v", ctypes.c_int),
         ("flash_attn", ctypes.c_uint8),
         ("offload_kqv", ctypes.c_uint8),
+        ("n_threads", ctypes.c_int32),
+        ("n_threads_batch", ctypes.c_int32),
         ("reserved", ctypes.c_uint8 * 6),
     ]
 
