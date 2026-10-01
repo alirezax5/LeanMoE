@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LM_BRIDGE_API_VERSION 10u
+#define LM_BRIDGE_API_VERSION 11u
 
 typedef void * lm_model_t;
 
@@ -82,7 +82,9 @@ typedef void * lm_context_t;
 
 typedef enum lm_kv_type {
     LM_KV_F16  = 0,
-    LM_KV_Q8_0 = 1
+    LM_KV_Q8_0 = 1,
+    LM_KV_Q4_0 = 2,
+    LM_KV_Q4_1 = 3
 } lm_kv_type;
 
 typedef struct lm_context_config {

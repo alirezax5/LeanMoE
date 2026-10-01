@@ -12,6 +12,8 @@ from typing import Iterator, Optional
 from .native import (
     BRIDGE_API_VERSION,
     LM_KV_Q8_0,
+    LM_KV_Q4_0,
+    LM_KV_Q4_1,
     ContextConfig,
     ModelConfig,
     NativeBridge,
@@ -30,6 +32,8 @@ class BackendConfig:
     offload_kqv: int = 1
     use_mmap: int = 1
     use_mlock: int = 0
+    kv_type_k: int = LM_KV_Q8_0
+    kv_type_v: int = LM_KV_Q8_0
 
 
 @dataclass(frozen=True)
@@ -117,8 +121,8 @@ class LeanMoEBackend:
                     n_ctx=self.config.n_ctx,
                     n_batch=self.config.n_batch,
                     n_ubatch=self.config.n_ubatch,
-                    type_k=LM_KV_Q8_0,
-                    type_v=LM_KV_Q8_0,
+                    type_k=self.config.kv_type_k,
+                    type_v=self.config.kv_type_v,
                     flash_attn=self.config.flash_attn,
                     offload_kqv=self.config.offload_kqv,
                 ),
@@ -181,6 +185,25 @@ class LeanMoEBackend:
                 self._opened = False
                 self._position = 0
                 self._last_finish_reason = None
+
+    def reset_context(self) -> None:
+        # Fresh independent request context; keep bridge/model resident.
+        bridge = self._require_open()
+        old = self._context
+        self._context = None
+        if old is not None:
+            bridge.context_free(old)
+        self._context = bridge.context_create(
+            self._model,
+            ContextConfig(
+                n_ctx=self.config.n_ctx, n_batch=self.config.n_batch,
+                n_ubatch=self.config.n_ubatch, type_k=self.config.kv_type_k,
+                type_v=self.config.kv_type_v, flash_attn=self.config.flash_attn,
+                offload_kqv=self.config.offload_kqv,
+            ),
+        )
+        self._position = 0
+        self._last_finish_reason = None
 
     def __enter__(self) -> "LeanMoEBackend":
         return self.open()

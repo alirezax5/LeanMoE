@@ -313,6 +313,14 @@ lm_result lm_context_create(
                 params.type_k = GGML_TYPE_Q8_0;
                 break;
 
+            case LM_KV_Q4_0:
+                params.type_k = GGML_TYPE_Q4_0;
+                break;
+
+            case LM_KV_Q4_1:
+                params.type_k = GGML_TYPE_Q4_1;
+                break;
+
             default:
                 set_error("Unsupported K cache type");
                 return LM_ERROR_INVALID_ARGUMENT;
@@ -325,6 +333,14 @@ lm_result lm_context_create(
 
             case LM_KV_Q8_0:
                 params.type_v = GGML_TYPE_Q8_0;
+                break;
+
+            case LM_KV_Q4_0:
+                params.type_v = GGML_TYPE_Q4_0;
+                break;
+
+            case LM_KV_Q4_1:
+                params.type_v = GGML_TYPE_Q4_1;
                 break;
 
             default:

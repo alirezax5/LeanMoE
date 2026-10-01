@@ -1,0 +1,67 @@
+name: phase-3e7f-native-q4-api11
+on:
+  workflow_dispatch:
+jobs:
+  windows-cuda:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with: {submodules: recursive}
+      - name: Checkout pinned llama.cpp
+        shell: pwsh
+        run: |
+          if (-not (Test-Path external/llama.cpp/.git)) { git clone https://github.com/ggml-org/llama.cpp.git external/llama.cpp }
+          git -C external/llama.cpp fetch origin cea74625f
+          git -C external/llama.cpp checkout --detach cea74625f
+          $head=(git -C external/llama.cpp rev-parse HEAD).Trim()
+          if(-not $head.StartsWith("cea74625f")){throw "Pinned llama.cpp mismatch: $head"}
+      - name: Verify pinned KV enums
+        shell: pwsh
+        run: |
+          $g=Get-Content external/llama.cpp/ggml/include/ggml.h -Raw
+          foreach($x in @("GGML_TYPE_Q4_0    = 2","GGML_TYPE_Q4_1    = 3","GGML_TYPE_Q8_0    = 8")){
+            if(-not $g.Contains($x)){throw "Pinned enum evidence missing: $x"}
+          }
+      - name: Setup CUDA 13.4
+        uses: ./external/llama.cpp/.github/actions/windows-setup-cuda
+        with: {cuda_version: "13.4", cuda_arch: "x64"}
+      - name: Build API11
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSROOT=%%i
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -S native/bridge -B build/bridge -G "Ninja Multi-Config" -DLLAMA_CPP_DIR="%GITHUB_WORKSPACE%\external\llama.cpp" -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=89
+          cmake --build build/bridge --config Release
+      - name: Stage complete runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"; $stage="$env:GITHUB_WORKSPACE\artifact-runtime"; New-Item -ItemType Directory -Force $stage|Out-Null
+          foreach($n in @("leanmoe_bridge.dll","llama-common.dll","llama.dll","ggml.dll","ggml-base.dll","ggml-cpu.dll","ggml-cuda.dll")){
+            $f=Get-ChildItem build/bridge -Recurse -File -Filter $n|Select-Object -First 1; if(!$f){throw "Missing $n"}; Copy-Item $f.FullName "$stage\$n"
+          }
+          function FindDll($n){
+            foreach($d in ($env:PATH -split ';')){if($d -and (Test-Path $d)){ $x=Join-Path $d $n; if(Test-Path $x){return Get-Item $x}}}
+            foreach($r in @($env:CUDA_PATH,$env:CUDA_PATH_V13_4,$env:RUNNER_TOOL_CACHE,"C:\Program Files")){
+              if($r-and(Test-Path $r)){ $x=Get-ChildItem $r -Recurse -File -Filter $n -ErrorAction SilentlyContinue|Select-Object -First 1;if($x){return $x}}
+            };throw "Required DLL not found: $n"
+          }
+          foreach($n in @("cublas64_13.dll","cublasLt64_13.dll","libcrypto-3-x64.dll","libssl-3-x64.dll")){$f=FindDll $n;Copy-Item $f.FullName "$stage\$n"}
+          $v=Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio" -Recurse -File -Filter vcomp140.dll -ErrorAction SilentlyContinue|Where-Object {$_.FullName -match '\\x64\\'}|Select-Object -First 1
+          if(!$v){throw "vcomp140.dll not found"};Copy-Item $v.FullName "$stage\vcomp140.dll"
+      - name: API11 isolated load
+        shell: pwsh
+        run: |
+          @'
+          import ctypes,os
+          from pathlib import Path
+          d=Path(os.environ["GITHUB_WORKSPACE"])/"artifact-runtime"; h=os.add_dll_directory(str(d))
+          for n in ["ggml-base.dll","ggml-cpu.dll","cublas64_13.dll","cublasLt64_13.dll","ggml-cuda.dll","ggml.dll","llama.dll","libcrypto-3-x64.dll","libssl-3-x64.dll","llama-common.dll"]:
+              ctypes.CDLL(str(d/n))
+          b=ctypes.CDLL(str(d/"leanmoe_bridge.dll"));b.lm_api_version.restype=ctypes.c_uint32
+          assert b.lm_api_version()==11,b.lm_api_version();print("[PASS] Bridge API 11")
+          '@ | python -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leanmoe-phase3e7f-api11-runtime
+          path: artifact-runtime/*
+          if-no-files-found: error

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 
-BRIDGE_API_VERSION = 10
+BRIDGE_API_VERSION = 11
 
 LM_OK = 0
 LM_ERROR_INVALID_ARGUMENT = -1
@@ -19,6 +19,8 @@ LM_ERROR_BUFFER_TOO_SMALL = -101
 
 LM_KV_F16 = 0
 LM_KV_Q8_0 = 1
+LM_KV_Q4_0 = 2
+LM_KV_Q4_1 = 3
 
 LMToken = ctypes.c_int32
 
