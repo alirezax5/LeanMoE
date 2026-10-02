@@ -1,9 +1,6 @@
 name: phase-3e7f-native-q4-api11
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - phase-3c3a-chat-template
 jobs:
   windows-cuda:
     runs-on: windows-2025

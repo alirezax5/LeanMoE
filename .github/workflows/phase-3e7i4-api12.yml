@@ -1,40 +1,249 @@
 name: phase-3e7i4-api12-thread-controls
+
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - phase-3c3a-chat-template
+
 jobs:
-  build:
+  windows-cuda:
     runs-on: windows-2025
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Checkout pinned llama.cpp
         shell: pwsh
-        run: git -C external/llama.cpp checkout cea74625f
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if (-not (Test-Path external/llama.cpp/.git)) {
+            git clone https://github.com/ggml-org/llama.cpp.git external/llama.cpp
+          }
+
+          git -C external/llama.cpp fetch origin cea74625f
+          git -C external/llama.cpp checkout --detach cea74625f
+
+          $head = (git -C external/llama.cpp rev-parse HEAD).Trim()
+          Write-Host "llama.cpp HEAD: $head"
+
+          if (-not $head.StartsWith("cea74625f")) {
+            throw "Pinned llama.cpp mismatch: $head"
+          }
+
+      - name: Verify pinned thread API
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $header = Get-Content external/llama.cpp/include/llama.h -Raw
+
+          foreach ($needle in @(
+            "int32_t n_threads;",
+            "int32_t n_threads_batch;"
+          )) {
+            if (-not $header.Contains($needle)) {
+              throw "Pinned llama.cpp thread API evidence missing: $needle"
+            }
+          }
+
+          Write-Host "[PASS] pinned llama.cpp exposes n_threads and n_threads_batch"
+
+      - name: Verify LeanMoE API12 source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $h   = Get-Content native/bridge/bridge.h -Raw
+          $cpp = Get-Content native/bridge/bridge.cpp -Raw
+          $py  = Get-Content src/leanmoe/native.py -Raw
+          $be  = Get-Content src/leanmoe/backend.py -Raw
+
+          foreach ($needle in @("n_threads", "n_threads_batch")) {
+            if (-not $h.Contains($needle)) {
+              throw "bridge.h missing $needle"
+            }
+            if (-not $cpp.Contains($needle)) {
+              throw "bridge.cpp missing $needle"
+            }
+            if (-not $py.Contains($needle)) {
+              throw "native.py missing $needle"
+            }
+            if (-not $be.Contains($needle)) {
+              throw "backend.py missing $needle"
+            }
+          }
+
+          Write-Host "[PASS] API12 thread controls present across native/Python layers"
+
       - name: Setup CUDA 13.4
         uses: ./external/llama.cpp/.github/actions/windows-setup-cuda
         with:
           cuda_version: "13.4"
           cuda_arch: "x64"
-      - uses: ilammy/msvc-dev-cmd@v1
-      - name: Build
+
+      - name: Build API12
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSROOT=%%i
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -S native/bridge -B build/bridge -G "Ninja Multi-Config" -DLLAMA_CPP_DIR="%GITHUB_WORKSPACE%\external\llama.cpp" -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=89
+          cmake --build build/bridge --config Release
+
+      - name: Stage complete API12 runtime
         shell: pwsh
         run: |
-          cmake -S native/bridge -B build/bridge -G Ninja -DLLAMA_CPP_DIR="$pwd/external/llama.cpp" -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=89
-          cmake --build build/bridge
-      - name: Stage
+          $ErrorActionPreference = "Stop"
+
+          $stage = "$env:GITHUB_WORKSPACE\artifact-runtime"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+
+          foreach ($n in @(
+            "leanmoe_bridge.dll",
+            "llama-common.dll",
+            "llama.dll",
+            "ggml.dll",
+            "ggml-base.dll",
+            "ggml-cpu.dll",
+            "ggml-cuda.dll"
+          )) {
+            $f = Get-ChildItem build/bridge -Recurse -File -Filter $n |
+              Select-Object -First 1
+
+            if (-not $f) {
+              throw "Missing required build DLL: $n"
+            }
+
+            Copy-Item $f.FullName "$stage\$n"
+          }
+
+          function Find-Dll([string]$Name) {
+            foreach ($d in ($env:PATH -split ';')) {
+              if ($d -and (Test-Path $d)) {
+                $candidate = Join-Path $d $Name
+                if (Test-Path $candidate) {
+                  return Get-Item $candidate
+                }
+              }
+            }
+
+            foreach ($root in @(
+              $env:CUDA_PATH,
+              $env:CUDA_PATH_V13_4,
+              $env:RUNNER_TOOL_CACHE,
+              "C:\Program Files"
+            )) {
+              if ($root -and (Test-Path $root)) {
+                $candidate = Get-ChildItem $root -Recurse -File `
+                  -Filter $Name -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+
+                if ($candidate) {
+                  return $candidate
+                }
+              }
+            }
+
+            throw "Required DLL not found: $Name"
+          }
+
+          foreach ($n in @(
+            "cublas64_13.dll",
+            "cublasLt64_13.dll",
+            "libcrypto-3-x64.dll",
+            "libssl-3-x64.dll"
+          )) {
+            $f = Find-Dll $n
+            Copy-Item $f.FullName "$stage\$n"
+          }
+
+          $vcomp = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio" `
+            -Recurse -File -Filter vcomp140.dll -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Select-Object -First 1
+
+          if (-not $vcomp) {
+            throw "vcomp140.dll not found"
+          }
+
+          Copy-Item $vcomp.FullName "$stage\vcomp140.dll"
+
+          Write-Host "=== API12 runtime ==="
+          Get-ChildItem $stage | Sort-Object Name |
+            Select-Object Name, Length
+
+      - name: API12 isolated load
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force runtime/api12 | Out-Null
-          Get-ChildItem build/bridge -Recurse -Filter leanmoe_bridge.dll | Select-Object -First 1 | Copy-Item -Destination runtime/api12/leanmoe_bridge.dll
-          $names=@("llama.dll","llama-common.dll","ggml.dll","ggml-base.dll","ggml-cpu.dll","ggml-cuda.dll","cublas64_13.dll","cublasLt64_13.dll","libcrypto-3-x64.dll","libssl-3-x64.dll","vcomp140.dll")
-          foreach($n in $names){$f=Get-ChildItem build/bridge,external/llama.cpp -Recurse -Filter $n -ErrorAction SilentlyContinue|Select-Object -First 1;if($f){Copy-Item $f.FullName runtime/api12/$n}}
-      - name: Verify API12
+          $ErrorActionPreference = "Stop"
+
+          @'
+          import ctypes
+          import os
+          from pathlib import Path
+
+          d = Path(os.environ["GITHUB_WORKSPACE"]) / "artifact-runtime"
+          h = os.add_dll_directory(str(d))
+
+          dependencies = [
+              "ggml-base.dll",
+              "ggml-cpu.dll",
+              "cublas64_13.dll",
+              "cublasLt64_13.dll",
+              "ggml-cuda.dll",
+              "ggml.dll",
+              "llama.dll",
+              "libcrypto-3-x64.dll",
+              "libssl-3-x64.dll",
+              "llama-common.dll",
+          ]
+
+          for name in dependencies:
+              ctypes.CDLL(str(d / name))
+
+          bridge = ctypes.CDLL(str(d / "leanmoe_bridge.dll"))
+          bridge.lm_api_version.restype = ctypes.c_uint32
+
+          version = bridge.lm_api_version()
+          print("Bridge API:", version)
+
+          assert version == 12, version
+
+          print("[PASS] Bridge API 12")
+          '@ | python -
+
+      - name: Package API12 runtime ZIP
         shell: pwsh
         run: |
-          $env:PATH="$pwd/runtime/api12;$env:PATH"
-          python -c "import ctypes;b=ctypes.CDLL(r'runtime/api12/leanmoe_bridge.dll');b.lm_api_version.restype=ctypes.c_uint32;print('API',b.lm_api_version());assert b.lm_api_version()==12"
-      - uses: actions/upload-artifact@v4
+          $ErrorActionPreference = "Stop"
+
+          $zip = "$env:GITHUB_WORKSPACE\leanmoe-phase3e7i4-api12-win64.zip"
+
+          if (Test-Path $zip) {
+            Remove-Item $zip -Force
+          }
+
+          Compress-Archive `
+            -Path "$env:GITHUB_WORKSPACE\artifact-runtime\*" `
+            -DestinationPath $zip `
+            -CompressionLevel Optimal
+
+          $hash = Get-FileHash $zip -Algorithm SHA256
+
+          Write-Host "Artifact: $zip"
+          Write-Host "SHA256: $($hash.Hash)"
+
+          $hash.Hash | Set-Content `
+            "$env:GITHUB_WORKSPACE\leanmoe-phase3e7i4-api12-win64.sha256"
+
+      - name: Upload API12 runtime
+        uses: actions/upload-artifact@v4
         with:
-          name: leanmoe-phase3e7i4-api12-runtime
-          path: runtime/api12/*
+          name: leanmoe-phase3e7i4-api12-win64
+          path: |
+            leanmoe-phase3e7i4-api12-win64.zip
+            leanmoe-phase3e7i4-api12-win64.sha256
+          if-no-files-found: error
